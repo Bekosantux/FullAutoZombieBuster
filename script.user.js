@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FullAutoZombieBuster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.3.0
+// @version      1.4.1
 // @description  返信欄（会話タイムライン）で、条件を満たすアカウントを自動でブロック/ミュートします。 
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -25,12 +25,16 @@
   const ENABLE_COND3 = true; // 3) キーワード（プロフィール/表示名）
   const ENABLE_COND4 = true; // 4) プロフィールに日本語が含まれていない
 
-  // 特殊条件A: 認証済み&プロフィールに日本語が含まれない場合、他条件によらずブロック
-  // 誤爆の可能性があるためデフォルトでは無効
-  const ENABLE_CONDA = false;
+  // 特殊条件A: フォロー中のユーザーはあらゆる条件から除外
+  const ENABLE_CONDA = true;
 
-  // 特殊条件B: フォロー中のユーザーはあらゆる条件から除外
-  const ENABLE_CONDB = true;
+  // 特殊条件B: 認証済み&プロフィールに日本語が含まれない場合、他条件によらずブロック
+  // 誤爆の可能性があるためデフォルトでは無効
+  const ENABLE_CONDB = false;
+
+  // 特殊条件C: 認証済み&プロフィールが空欄の場合、他条件によらずブロック
+  // 誤爆の可能性があるためデフォルトでは無効
+  const ENABLE_CONDC = false;
 
   const SCAN_INTERVAL_MS = 1000;
   const PROFILE_MAX_RETRIES = 6;
@@ -81,8 +85,10 @@
   }
 
   // ===== プロフィールキャッシュ =====
-  // lower(handle) -> { bio, profileText, following, ts }
+  // lower(handle) -> { bio, profileText, profileEmpty, ts }
   const profileCache = new Map();
+
+  const hasOwn = (obj, key) => !!obj && Object.prototype.hasOwnProperty.call(obj, key);
 
   function pickFirstString(...candidates) {
     for (const c of candidates) {
@@ -142,23 +148,21 @@
       expandedUrl
     ));
 
-    const followingRaw =
-      obj.following ??
-      legacy?.following ??
-      rLegacy?.following ??
-      result?.following;
-    const following = (typeof followingRaw === 'boolean') ? followingRaw : undefined;
+    // 重要: GraphQLの一部レスポンスは screen_name だけ等「プロフィール項目が未同梱」なことがある。
+    // それを空欄プロフィール扱いにすると、条件Cが暴発する。
+    const profileKnown =
+      hasOwn(obj, 'description') || hasOwn(obj, 'location') || hasOwn(obj, 'url') || hasOwn(obj, 'entities') ||
+      hasOwn(legacy, 'description') || hasOwn(legacy, 'location') || hasOwn(legacy, 'url') || hasOwn(legacy, 'entities') ||
+      hasOwn(rLegacy, 'description') || hasOwn(rLegacy, 'location') || hasOwn(rLegacy, 'url') || hasOwn(rLegacy, 'entities') ||
+      hasOwn(result, 'description') || hasOwn(result, 'location') || hasOwn(result, 'url') || hasOwn(result, 'entities');
 
     const profileText = buildProfileText({ bio, location, url });
-    // プロフィールが空でも「フォロー中」判定のために following だけ保存したい
-    if (!profileText && following === undefined) return false;
+    const profileEmpty = profileKnown && !bio && !location && !url;
 
-    profileCache.set(String(screenName).toLowerCase(), {
-      bio,
-      profileText,
-      following,
-      ts: Date.now(),
-    });
+    // プロフィール項目が未同梱のオブジェクトはキャッシュしない（後続の完全なpayloadを待つ）
+    if (!profileKnown) return false;
+
+    profileCache.set(String(screenName).toLowerCase(), { bio, profileText, profileEmpty, ts: Date.now() });
     return true;
   }
 
@@ -326,7 +330,33 @@
   }
 
   // ===== UI操作（必要時のみ） =====
+  function getOpenMenuElement() {
+    const menus = Array.from(document.querySelectorAll('div[role="menu"]'));
+    // 最後に出た（＝一番手前になりやすい）かつ表示中のメニューを優先
+    for (let i = menus.length - 1; i >= 0; i--) {
+      const m = menus[i];
+      const rect = m.getBoundingClientRect();
+      const visible = rect.width > 0 && rect.height > 0;
+      if (visible) return m;
+    }
+    return null;
+  }
+
+  async function waitMenuClosed(timeoutMs = 600) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (!getOpenMenuElement()) return true;
+      await sleep(30);
+    }
+    return !getOpenMenuElement();
+  }
+
   async function openTweetMenu(article) {
+    // 既存メニューが残っていると、次の判定で誤検知しやすいので先に閉じる
+    if (getOpenMenuElement()) {
+      await closeMenuIfOpen();
+      await waitMenuClosed(800);
+    }
     const btn =
       article.querySelector('button[data-testid="caret"]') ||
       article.querySelector('[aria-label="More"]') ||
@@ -336,7 +366,7 @@
     btn.click();
     const start = Date.now();
     while (Date.now() - start < 1200) {
-      if (document.querySelector('div[role="menu"]')) return true;
+      if (getOpenMenuElement()) return true;
       await sleep(50);
     }
     return false;
@@ -345,7 +375,12 @@
   async function clickMenuItemByText(textCandidates) {
     const start = Date.now();
     while (Date.now() - start < 1200) {
-      const items = Array.from(document.querySelectorAll('div[role="menuitem"], a[role="menuitem"], button[role="menuitem"]'));
+      const menu = getOpenMenuElement();
+      if (!menu) {
+        await sleep(50);
+        continue;
+      }
+      const items = Array.from(menu.querySelectorAll('div[role="menuitem"], a[role="menuitem"], button[role="menuitem"]'));
       for (const it of items) {
         const t = norm(it.textContent || '');
         if (!t) continue;
@@ -357,6 +392,57 @@
       await sleep(50);
     }
     return false;
+  }
+
+  function menuHasText(textCandidates) {
+    const menu = getOpenMenuElement();
+    if (!menu) return false;
+    const items = Array.from(menu.querySelectorAll('div[role="menuitem"], a[role="menuitem"], button[role="menuitem"]'));
+    for (const it of items) {
+      const t = norm(it.textContent || '');
+      if (!t) continue;
+      if (textCandidates.some((c) => t.includes(c))) return true;
+    }
+    return false;
+  }
+
+  function getFollowStatusFromMenu() {
+    const followed = menuHasText([
+      'フォロー解除',
+      'フォローを解除',
+      'フォローを解除する',
+      'フォローをやめる',
+      'フォロー中',
+      'Unfollow',
+      'Following',
+    ]);
+    if (followed) return 'followed';
+
+    const notFollowed = menuHasText([
+      'フォローする',
+      'フォロー',
+      'Follow',
+    ]);
+    if (notFollowed) return 'not_followed';
+
+    return 'unknown';
+  }
+
+  async function closeMenuIfOpen() {
+    try {
+      if (!getOpenMenuElement()) return;
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        keyCode: 27,
+        which: 27,
+        bubbles: true,
+        cancelable: true,
+      }));
+      await sleep(50);
+    } catch {
+      // ignore
+    }
   }
 
   async function confirmBlockIfNeeded() {
@@ -379,6 +465,7 @@
   const processedHandles = new Set();
   const handleAttempts = new Map();
   const handleSeenCount = new Map();
+  const followCheckAttempts = new Map();
 
   setupNetworkSniffer();
 
@@ -398,12 +485,12 @@
     const cond1 = ENABLE_COND1 ? rawCond1 : true;
     const cond2 = ENABLE_COND2 ? rawCond2 : true;
 
-    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDA || ENABLE_CONDB;
+    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDB || ENABLE_CONDC;
     const handleKey = String(handle).toLowerCase();
 
     let profileText = '';
     let bio = '';
-    let isFollowing = false;
+    let profileEmpty = false;
     if (needsProfile) {
       const attempts = (handleAttempts.get(handleKey) || 0) + 1;
       handleAttempts.set(handleKey, attempts);
@@ -414,19 +501,17 @@
         return;
       }
 
-      // 条件B（フォロー中除外）
-      isFollowing = cached.following === true;
-      if (ENABLE_CONDB && isFollowing) {
-        processedHandles.add(handle);
-        return;
-      }
-
       profileText = cached.profileText || '';
       bio = cached.bio || '';
+      profileEmpty = cached.profileEmpty === true;
 
-      // 条件3/4/A が有効な場合、プロフィール文が取れない相手は判定不能として待つ
-      const needsProfileText = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDA;
-      if (needsProfileText && !profileText) {
+      // 条件3/4/B が有効なのにプロフィール文が取れない場合は待つ（ただし条件C成立なら待たない）
+      const hasProfileTextNow = !!profileText;
+      const rawCondCNow = rawCond2 && profileEmpty;
+      const condCNow = ENABLE_CONDC && rawCondCNow;
+
+      const needsNonEmptyProfileText = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDB;
+      if (!condCNow && needsNonEmptyProfileText && !hasProfileTextNow) {
         if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
         return;
       }
@@ -438,14 +523,16 @@
     const cond3 = ENABLE_COND3 ? rawCond3 : true;
     const cond4 = ENABLE_COND4 ? rawCond4 : true;
 
-    const rawCondA = rawCond2 && rawCond4;
-    const condA = ENABLE_CONDA && rawCondA;
+    const rawCondB = rawCond2 && rawCond4;
+    const rawCondC = rawCond2 && profileEmpty;
+    const condB = ENABLE_CONDB && rawCondB;
+    const condC = ENABLE_CONDC && rawCondC;
 
-    const shouldAct = condA || (cond1 && cond2 && cond3 && cond4);
+    const shouldAct = condB || condC || (cond1 && cond2 && cond3 && cond4);
 
     if (!shouldAct) {
-      // 特殊条件Aが無効な場合のみ、表示名/認証の早期除外で負荷を下げる
-      if (!ENABLE_CONDA && (!cond1 || !cond2)) {
+      // 特殊条件B/Cが無効な場合のみ、表示名/認証の早期除外
+      if (!ENABLE_CONDB && !ENABLE_CONDC && (!cond1 || !cond2)) {
         if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
         return;
       }
@@ -454,43 +541,65 @@
     }
 
     const reason = {
-      enabled: {
-        cond1: ENABLE_COND1,
-        cond2: ENABLE_COND2,
-        cond3: ENABLE_COND3,
-        cond4: ENABLE_COND4,
-        condA: ENABLE_CONDA,
-        condB: ENABLE_CONDB,
-      },
       raw: {
         cond1: rawCond1,
         cond2: rawCond2,
         cond3: rawCond3,
         cond4: rawCond4,
-        condA: rawCondA,
-        condB: isFollowing,
+        condA: 'unknown',
+        condB: rawCondB,
+        condC: rawCondC,
       },
-      cond1, cond2, cond3, cond4,
-      condA,
       displayName,
       bio: bio.slice(0, 140),
       profileText: profileText.slice(0, 140),
+      profileEmpty,
     };
 
-    const actionToRun = condA ? 'block' : ACTION;
+    const actionToRun = (condB || condC) ? 'block' : ACTION;
 
-    if (DRY_RUN) {
-      log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
-      processedHandles.add(handle);
-      return;
-    }
-
-    log(`${actionToRun} 実行`, `@${handle}`, reason);
     const opened = await openTweetMenu(article);
     if (!opened) {
       processedHandles.add(handle);
       return;
     }
+
+    // 条件A（フォロー中除外）
+    if (ENABLE_CONDA) {
+      const followStatus = getFollowStatusFromMenu();
+      reason.raw.condA = followStatus;
+
+      if (followStatus === 'followed') {
+        log('skip (followed user)', `@${handle}`);
+        await closeMenuIfOpen();
+        await waitMenuClosed(800);
+        processedHandles.add(handle);
+        return;
+      }
+
+      if (followStatus === 'unknown') {
+        // 安全側: フォロー状態を判定できない場合は実行しない
+        const k = String(handle).toLowerCase();
+        const n = (followCheckAttempts.get(k) || 0) + 1;
+        followCheckAttempts.set(k, n);
+        log('skip (follow status unknown)', `@${handle}`, { tries: n });
+        await closeMenuIfOpen();
+        await waitMenuClosed(800);
+        // 何度もunknownが続く場合はキャンセル
+        if (n >= 3) processedHandles.add(handle);
+        return;
+      }
+    }
+
+    if (DRY_RUN) {
+      log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
+      await closeMenuIfOpen();
+      await waitMenuClosed(800);
+      processedHandles.add(handle);
+      return;
+    }
+
+    log(`${actionToRun} 実行`, `@${handle}`, reason);
 
     if (actionToRun === 'mute') {
       await clickMenuItemByText(['ミュート', 'Mute']);
@@ -535,5 +644,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_CONDA, ENABLE_CONDB });
+  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_CONDA, ENABLE_CONDB, ENABLE_CONDC });
 })();
