@@ -22,13 +22,13 @@
   // 一般条件1〜4の個別ON/OFF
   const ENABLE_COND1 = true; // 1) 表示名に日本語が含まれていない
   const ENABLE_COND2 = true; // 2) 認証済み
-  const ENABLE_COND3 = true; // 3) キーワード（プロフィール/表示名）
+  const ENABLE_COND3 = true; // 3) キーワード（プロフィール+表示名）
   const ENABLE_COND4 = true; // 4) プロフィールに日本語が含まれていない
 
   // 特殊条件A: フォロー中のユーザーはあらゆる条件から除外
   const ENABLE_CONDA = true;
 
-  // 特殊条件B: 認証済み&プロフィールに日本語が含まれない場合、他条件によらずブロック
+  // 特殊条件B: 認証済み &（表示名+プロフィール）に日本語が含まれない場合、他条件によらずブロック
   // 誤爆の可能性があるためデフォルトでは無効
   const ENABLE_CONDB = false;
 
@@ -523,7 +523,7 @@
     const cond3 = ENABLE_COND3 ? rawCond3 : true;
     const cond4 = ENABLE_COND4 ? rawCond4 : true;
 
-    const rawCondB = rawCond2 && rawCond4;
+    const rawCondB = rawCond2 && rawCond1 && rawCond4;
     const rawCondC = rawCond2 && profileEmpty;
     const condB = ENABLE_CONDB && rawCondB;
     const condC = ENABLE_CONDC && rawCondC;
