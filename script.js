@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FullAutoZombieBuster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.1.0
+// @version      1.2.0
 // @description  返信欄（会話タイムライン）で、次の条件を満たすアカウントを自動でブロック/ミュートします。 1. 表示名に日本語が含まれていない  2. 認証済みアカウントである  3. プロフィールに特定の文字列が含まれている  4. プロフィールに日本語が含まれていない
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -22,6 +22,10 @@
   const ENABLE_COND2 = true; // 2) 認証済み
   const ENABLE_COND3 = true; // 3) キーワード（プロフィール/表示名）
   const ENABLE_COND4 = true; // 4) プロフィールに日本語が含まれていない
+
+  // 追加ルール: 認証済み かつ プロフィールに日本語が含まれない場合、他条件によらずブロック
+  // 誤爆の可能性があるためデフォルトでは無効
+  const ENABLE_COND2A = false;
 
   const SCAN_INTERVAL_MS = 1000;
   const PROFILE_MAX_RETRIES = 6;
@@ -380,12 +384,7 @@
     const cond1 = ENABLE_COND1 ? rawCond1 : true;
     const cond2 = ENABLE_COND2 ? rawCond2 : true;
 
-    if (!cond1 || !cond2) {
-      if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
-      return;
-    }
-
-    const needsProfile = ENABLE_COND3 || ENABLE_COND4;
+    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_COND2A;
     const handleKey = String(handle).toLowerCase();
 
     let profileText = '';
@@ -408,7 +407,18 @@
     const cond3 = ENABLE_COND3 ? rawCond3 : true;
     const cond4 = ENABLE_COND4 ? rawCond4 : true;
 
-    if (!(cond1 && cond2 && cond3 && cond4)) {
+    const rawCond2A = rawCond2 && rawCond4;
+    const cond2A = ENABLE_COND2A && rawCond2A;
+
+    const shouldAct = cond2A || (cond1 && cond2 && cond3 && cond4);
+
+    if (!shouldAct) {
+      // 2_a が有効な間は、表示名がまだ取れていない等の揺れで取りこぼさないよう、
+      // 早期に processed に入れる判定を控えめにする。
+      if (!ENABLE_COND2A && (!cond1 || !cond2)) {
+        if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
+        return;
+      }
       processedHandles.add(handle);
       return;
     }
@@ -419,33 +429,38 @@
         cond2: ENABLE_COND2,
         cond3: ENABLE_COND3,
         cond4: ENABLE_COND4,
+        cond2A: ENABLE_COND2A,
       },
       raw: {
         cond1: rawCond1,
         cond2: rawCond2,
         cond3: rawCond3,
         cond4: rawCond4,
+        cond2A: rawCond2A,
       },
       cond1, cond2, cond3, cond4,
+      cond2A,
       displayName,
       bio: bio.slice(0, 140),
       profileText: profileText.slice(0, 140),
     };
 
+    const actionToRun = cond2A ? 'block' : ACTION;
+
     if (DRY_RUN) {
-      log(`DRY_RUN: ${ACTION} 対象`, `@${handle}`, reason);
+      log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
       processedHandles.add(handle);
       return;
     }
 
-    log(`${ACTION} 実行`, `@${handle}`, reason);
+    log(`${actionToRun} 実行`, `@${handle}`, reason);
     const opened = await openTweetMenu(article);
     if (!opened) {
       processedHandles.add(handle);
       return;
     }
 
-    if (ACTION === 'mute') {
+    if (actionToRun === 'mute') {
       await clickMenuItemByText(['ミュート', 'Mute']);
     } else {
       const ok = await clickMenuItemByText(['ブロック', 'Block']);
@@ -488,5 +503,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4 });
+  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_COND2A });
 })();
