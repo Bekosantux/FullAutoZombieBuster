@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FullAutoZombieBuster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.4.1
+// @version      1.4.2
 // @description  返信欄（会話タイムライン）で、条件を満たすアカウントを自動でブロック/ミュートします。 
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -44,12 +44,24 @@
   const log = (...args) => console.log('[imp-zombie]', ...args);
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
+  // 簡体字に頻出の漢字
+  const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资]/;
+
   const hasJapanese = (text) => {
     if (!text) return false;
     try {
-      return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(text);
+      const t = String(text);
+      // かながあるなら日本語扱い
+      if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(t)) return true;
+      // かな無しで簡体字特有の字があるなら日本語扱いしない
+      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
+      // それ以外の漢字は日本語扱い
+      return /[\p{Script=Han}]/u.test(t);
     } catch {
-      return /[ぁ-んァ-ン一-龥]/.test(text);
+      const t = String(text);
+      if (/[ぁ-んァ-ン]/.test(t)) return true;
+      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
+      return /[一-龥]/.test(t);
     }
   };
 
@@ -352,7 +364,7 @@
   }
 
   async function openTweetMenu(article) {
-    // 既存メニューが残っていると、次の判定で誤検知しやすいので先に閉じる
+    // 既存メニューを先に閉じる
     if (getOpenMenuElement()) {
       await closeMenuIfOpen();
       await waitMenuClosed(800);
