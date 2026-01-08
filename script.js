@@ -1,64 +1,241 @@
 // ==UserScript==
-// @name         X インプレゾンビ自動ミュート/ブロック（条件1-4）
-// @namespace    https://example.local/
-// @version      0.1.0
-// @description  返信欄（会話タイムライン）で表示名/認証/ホバーカードのプロフィールから判定し、条件1-4を全て満たすアカウントをミュート/ブロックします（条件5は未実装）
+// @name         FullAutoZombieBuster
+// @namespace    https://com.bekosantux.full-auto-zombie-buster
+// @version      1.0.0
+// @description  返信欄（会話タイムライン）で、次の条件を満たすアカウントを自動でブロック/ミュートします。 1. 表示名に日本語が含まれていない  2. 認証済みアカウントである  3. プロフィールに特定の文字列が含まれている  4. プロフィールに日本語が含まれていない
 // @match        https://x.com/*
 // @match        https://twitter.com/*
-// @run-at       document-idle
+// @run-at       document-start
+// @grant        none
 // ==/UserScript==
 
 (() => {
   'use strict';
 
   // ===== 設定 =====
-  const ACTION = 'mute'; // 'mute' or 'block'
-  const DRY_RUN = true;  // true: クリックしない（ログのみ）
+  const ACTION = 'block'; // 'mute' または 'block'
+  const DRY_RUN = false; // trueの場合はログのみ
+  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing']; // 小文字大文字は区別されません
   const SCAN_INTERVAL_MS = 1200;
-  const HOVERCARD_TIMEOUT_MS = 1800;
-  const KEYWORDS = ['Web3', 'Crypto', 'AI']; // 条件3
-  const DEBUG = false;
+  const PROFILE_MAX_RETRIES = 6;
 
-  // ===== ユーティリティ =====
+  // ===== 共通 =====
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const log = (...args) => console.log('[imp-zombie]', ...args);
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
-  // ひらがな/カタカナ/漢字が含まれるか（表示名・プロフィール日本語判定用）
   const hasJapanese = (text) => {
     if (!text) return false;
     try {
       return /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(text);
     } catch {
-      // 古い環境向けフォールバック（ざっくり）
       return /[ぁ-んァ-ン一-龥]/.test(text);
     }
   };
-
-  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
   const includesAnyKeyword = (text) => {
     const t = (text || '').toLowerCase();
     return KEYWORDS.some((k) => t.includes(String(k).toLowerCase()));
   };
 
-  const log = (...args) => console.log('[imp-zombie]', ...args);
-  const dlog = (...args) => { if (DEBUG) console.log('[imp-zombie:debug]', ...args); };
+  function safeJsonParse(text) {
+    if (text == null) return null;
+    let t = String(text);
+    if (t.charCodeAt(0) === 0xFEFF) t = t.slice(1);
 
-  // ===== X DOMヘルパ =====
-  function getConversationRoot() {
-    // 会話タイムライン（言語差・UI差があるので複数候補）
-    const candidates = [
-      'div[aria-label="タイムライン: 会話"]',
-      'div[aria-label="Timeline: Conversation"]',
-      'section[aria-label="タイムライン: 会話"]',
-      'section[aria-label="Timeline: Conversation"]',
-    ];
-    for (const sel of candidates) {
-      const el = document.querySelector(sel);
-      if (el) return el;
+    const trimmed = t.trimStart();
+    if (trimmed.startsWith(')]}\'')) {
+      const idx = trimmed.indexOf('\n');
+      t = idx >= 0 ? trimmed.slice(idx + 1) : '';
+    } else if (/^for\s*\(\s*;\s*;\s*\)\s*;/.test(trimmed)) {
+      t = trimmed.replace(/^for\s*\(\s*;\s*;\s*\)\s*;\s*/, '');
+    } else {
+      t = trimmed;
     }
-    // フォールバック：/status/ 配下なら main を使う
-    if (location.pathname.includes('/status/')) return document.querySelector('main') || document.body;
-    return null;
+
+    try {
+      return JSON.parse(t);
+    } catch {
+      return null;
+    }
+  }
+
+  function buildProfileText({ bio, location, url }) {
+    return norm([bio, location, url].filter(Boolean).join('\n'));
+  }
+
+  // ===== プロフィールキャッシュ（内部APIレスポンス“観測”のみ） =====
+  // lower(handle) -> { bio, profileText, ts }
+  const profileCache = new Map();
+
+  function pickFirstString(...candidates) {
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c;
+    }
+    return '';
+  }
+
+  function ingestPossibleUserObject(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+
+    // XのGraphQLは result.legacy / result.core / legacy などが混在する
+    const legacy = (obj.legacy && typeof obj.legacy === 'object') ? obj.legacy : null;
+    const result = (obj.result && typeof obj.result === 'object') ? obj.result : null;
+    const rLegacy = (result?.legacy && typeof result.legacy === 'object') ? result.legacy : null;
+    const rCore = (result?.core && typeof result.core === 'object') ? result.core : null;
+    const rUser = (result?.user && typeof result.user === 'object') ? result.user : null;
+
+    const screenName = pickFirstString(
+      obj.screen_name,
+      obj.username,
+      obj.handle,
+      legacy?.screen_name,
+      rLegacy?.screen_name,
+      rCore?.screen_name,
+      rCore?.screenName,
+      rUser?.screen_name,
+      rUser?.username
+    );
+    if (!screenName) return false;
+
+    const bio = norm(pickFirstString(
+      obj.description,
+      legacy?.description,
+      rLegacy?.description,
+      result?.description
+    ));
+    const location = norm(pickFirstString(
+      obj.location,
+      legacy?.location,
+      rLegacy?.location,
+      result?.location
+    ));
+
+    const expandedUrl =
+      legacy?.entities?.url?.urls?.[0]?.expanded_url ||
+      legacy?.entities?.url?.urls?.[0]?.expandedUrl ||
+      rLegacy?.entities?.url?.urls?.[0]?.expanded_url ||
+      rLegacy?.entities?.url?.urls?.[0]?.expandedUrl ||
+      obj?.entities?.url?.urls?.[0]?.expanded_url ||
+      obj?.entities?.url?.urls?.[0]?.expandedUrl ||
+      '';
+    const url = norm(pickFirstString(
+      obj.url,
+      legacy?.url,
+      rLegacy?.url,
+      expandedUrl
+    ));
+
+    const profileText = buildProfileText({ bio, location, url });
+    if (!profileText) return false;
+
+    profileCache.set(String(screenName).toLowerCase(), {
+      bio,
+      profileText,
+      ts: Date.now(),
+    });
+    return true;
+  }
+
+  function ingestJsonPayload(payload) {
+    const queue = [payload];
+    const seen = new Set();
+    while (queue.length) {
+      const cur = queue.shift();
+      if (!cur || typeof cur !== 'object') continue;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+
+      ingestPossibleUserObject(cur);
+
+      if (Array.isArray(cur)) {
+        for (const v of cur) queue.push(v);
+      } else {
+        for (const k of Object.keys(cur)) {
+          const v = cur[k];
+          if (v && typeof v === 'object') queue.push(v);
+        }
+      }
+    }
+  }
+
+  function setupNetworkSniffer() {
+    const shouldInspectUrl = (url) => {
+      if (!url) return false;
+      const u = String(url);
+      return u.includes('/i/api/') || u.includes('/graphql') || u.includes('api.x.com') || u.includes('api.twitter.com');
+    };
+
+    const tryIngestText = (text) => {
+      if (!text) return;
+      const t = String(text).trimStart();
+      if (!t) return;
+      if (t.length > 2_000_000) return;
+      const obj = safeJsonParse(t);
+      if (!obj) return;
+      ingestJsonPayload(obj);
+    };
+
+    // fetch
+    const origFetch = window.fetch;
+    if (typeof origFetch === 'function') {
+      window.fetch = async function (...args) {
+        const res = await origFetch.apply(this, args);
+        try {
+          const input = args[0];
+          const url = (typeof input === 'string') ? input : (input && input.url) ? input.url : '';
+          if (!shouldInspectUrl(url)) return res;
+          res.clone().text().then(tryIngestText).catch(() => { /* ignore */ });
+        } catch {
+          // ignore
+        }
+        return res;
+      };
+    }
+
+    // XHR
+    const OrigXHR = window.XMLHttpRequest;
+    if (typeof OrigXHR === 'function') {
+      const open = OrigXHR.prototype.open;
+      const send = OrigXHR.prototype.send;
+
+      OrigXHR.prototype.open = function (method, url, ...rest) {
+        this.__impZombieUrl = url;
+        return open.call(this, method, url, ...rest);
+      };
+
+      OrigXHR.prototype.send = function (...args) {
+        try {
+          this.addEventListener('load', function () {
+            try {
+              const url = this.__impZombieUrl || '';
+              if (!shouldInspectUrl(url)) return;
+
+              if (this.responseType === 'json' && this.response && typeof this.response === 'object') {
+                ingestJsonPayload(this.response);
+                return;
+              }
+              tryIngestText(this.responseText);
+            } catch {
+              // ignore
+            }
+          });
+        } catch {
+          // ignore
+        }
+        return send.apply(this, args);
+      };
+    }
+  }
+
+  // ===== DOM抽出（返信欄） =====
+  function isStatusPage() {
+    return location.pathname.includes('/status/');
+  }
+
+  function getConversationRoot() {
+    if (!isStatusPage()) return null;
+    return document.querySelector('main') || document.body;
   }
 
   function getTweetArticles(root) {
@@ -66,22 +243,28 @@
   }
 
   function extractUserNameBlock(article) {
-    return article.querySelector('div[data-testid="User-Name"]') || null;
+    return article.querySelector('[data-testid="User-Name"]') || null;
   }
 
-  function extractDisplayName(userNameBlock) {
-    // User-Name内の最初のspanが表示名であることが多い
-    const span = userNameBlock?.querySelector('span');
-    return norm(span?.textContent || '');
+  function extractDisplayNameFromNameBlock(userNameBlock) {
+    if (!userNameBlock) return '';
+    const spans = Array.from(userNameBlock.querySelectorAll('span'));
+    const texts = spans
+      .map((s) => norm(s.textContent || ''))
+      .filter(Boolean)
+      .filter((t) => t !== '·')
+      .filter((t) => !t.startsWith('@'))
+      .filter((t) => t !== '返信先' && t !== '返信先:' && t !== 'Replying to')
+      .filter((t) => !/^返信先\s*@/i.test(t))
+      .filter((t) => t !== '認証済みアカウント' && t.toLowerCase() !== 'verified account');
+    return texts[0] || '';
   }
 
-  function extractHandle(userNameBlock) {
-    // /<handle> へのリンクを探す（/status/ を含まないもの）
-    const links = Array.from(userNameBlock?.querySelectorAll('a[href^="/"]') || []);
+  function extractHandleFromLinks(container) {
+    const links = Array.from(container?.querySelectorAll('a[href^="/"]') || []);
     for (const a of links) {
       const href = a.getAttribute('href') || '';
       if (!href || href.includes('/status/')) continue;
-      // /i/user/<id> のような特殊リンクは除外
       if (href.startsWith('/i/')) continue;
       const handle = href.split('?')[0].split('/').filter(Boolean)[0];
       if (handle) return handle;
@@ -89,101 +272,46 @@
     return null;
   }
 
-  function isVerified(userNameBlock) {
-    if (!userNameBlock) return false;
-
-    // data-testid
-    if (userNameBlock.querySelector('[data-testid^="icon-verified"]')) return true;
-    if (userNameBlock.querySelector('[data-testid="icon-verified"]')) return true;
-
-    // aria-label
-    const svg = userNameBlock.querySelector('svg[aria-label]');
-    if (svg) {
-      const label = svg.getAttribute('aria-label') || '';
-      if (label.includes('認証済み') || label.toLowerCase().includes('verified')) return true;
+  function extractDisplayNameFromArticle(article, handle) {
+    if (!article || !handle) return '';
+    const a = article.querySelector(`a[href="/${CSS.escape(handle)}"]`);
+    if (a) {
+      const spans = Array.from(a.querySelectorAll('span'));
+      const texts = spans
+        .map((s) => norm(s.textContent || ''))
+        .filter(Boolean)
+        .filter((t) => !t.startsWith('@'));
+      if (texts[0]) return texts[0];
     }
+    return '';
+  }
 
-    // 他にも混ざるので広めに探索
-    const any = userNameBlock.querySelectorAll('svg[aria-label]');
-    for (const s of any) {
+  function isVerifiedFrom(container) {
+    if (!container) return false;
+    if (container.querySelector('[data-testid^="icon-verified"]')) return true;
+    if (container.querySelector('[data-testid*="verified"]')) return true;
+    const svgs = container.querySelectorAll('svg[aria-label]');
+    for (const s of svgs) {
       const label = s.getAttribute('aria-label') || '';
       if (label.includes('認証済み') || label.toLowerCase().includes('verified')) return true;
     }
+    const t = norm(container.textContent || '');
+    if (t.includes('認証済み') || /\bverified\b/i.test(t)) return true;
     return false;
   }
 
-  function findProfileLink(userNameBlock, handle) {
-    if (!userNameBlock || !handle) return null;
-    return userNameBlock.querySelector(`a[href="/${CSS.escape(handle)}"]`) || null;
-  }
-
-  function findHoverCard() {
-    // 現状よくある data-testid
-    return (
-      document.querySelector('div[data-testid="HoverCard"]') ||
-      document.querySelector('div[data-testid="hoverCard"]') ||
-      null
-    );
-  }
-
-  async function readProfileFromHoverCard(profileLinkEl) {
-    // ホバーカードはX側仕様変更に弱いので、取れない場合は空で返す
-    if (!profileLinkEl) return { bio: '', profileText: '' };
-
-    // hover 発火
-    profileLinkEl.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
-    profileLinkEl.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true, view: window }));
-    profileLinkEl.focus?.();
-
-    const start = Date.now();
-    let card = null;
-    while (Date.now() - start < HOVERCARD_TIMEOUT_MS) {
-      card = findHoverCard();
-      if (card) break;
-      await sleep(60);
-    }
-
-    let bio = '';
-    let location = '';
-    let url = '';
-
-    if (card) {
-      const bioEl = card.querySelector('[data-testid="UserDescription"]');
-      bio = norm(bioEl?.textContent || '');
-
-      const locEl = card.querySelector('[data-testid="UserLocation"]');
-      location = norm(locEl?.textContent || '');
-
-      const urlEl = card.querySelector('[data-testid="UserUrl"]');
-      url = norm(urlEl?.textContent || '');
-    }
-
-    // UI由来テキスト（フォローする等）が混ざらないよう、ユーザー入力系だけ合成
-    const profileText = norm([bio, location, url].filter(Boolean).join('\n'));
-
-    // hover解除（カードを閉じる）
-    profileLinkEl.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, cancelable: true, view: window }));
-    profileLinkEl.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true, cancelable: true, view: window }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-
-    return { bio, profileText };
-  }
-
+  // ===== UI操作（必要時のみ） =====
   async function openTweetMenu(article) {
     const btn =
       article.querySelector('button[data-testid="caret"]') ||
       article.querySelector('[aria-label="More"]') ||
       article.querySelector('[aria-label="もっと見る"]') ||
       null;
-
     if (!btn) return false;
     btn.click();
-
-    // メニューが出るまで少し待つ
     const start = Date.now();
     while (Date.now() - start < 1200) {
-      const menu = document.querySelector('div[role="menu"]');
-      if (menu) return true;
+      if (document.querySelector('div[role="menu"]')) return true;
       await sleep(50);
     }
     return false;
@@ -206,9 +334,7 @@
     return false;
   }
 
-  async function confirmDialogIfNeeded(action) {
-    if (action !== 'block') return true;
-    // ブロックは確認ダイアログが出ることが多い
+  async function confirmBlockIfNeeded() {
     const start = Date.now();
     while (Date.now() - start < 1500) {
       const buttons = Array.from(document.querySelectorAll('div[role="dialog"] button'));
@@ -224,56 +350,48 @@
     return false;
   }
 
-  // ===== 判定・処置 =====
+  // ===== スキャン・判定 =====
   const processedHandles = new Set();
-  const profileCache = new Map(); // handle -> {bio, profileText, ts}
+  const handleAttempts = new Map();
+  const handleSeenCount = new Map();
+
+  setupNetworkSniffer();
 
   async function evaluateAndActOnArticle(article) {
-    const userNameBlock = extractUserNameBlock(article);
-    if (!userNameBlock) return;
+    const nameBlock = extractUserNameBlock(article);
 
-    const displayName = extractDisplayName(userNameBlock);
-    const handle = extractHandle(userNameBlock);
+    const handle = extractHandleFromLinks(nameBlock) || extractHandleFromLinks(article);
     if (!handle) return;
     if (processedHandles.has(handle)) return;
 
-    // 返信欄だけを対象にしたいので /status/ 以外では動かさない（誤爆防止）
-    if (!location.pathname.includes('/status/')) return;
+    handleSeenCount.set(handle, (handleSeenCount.get(handle) || 0) + 1);
 
-    // 条件1: 表示名に日本語が含まれていない
-    const cond1 = !hasJapanese(displayName);
-
-    // 条件2: 認証済みアカウントである
-    const cond2 = isVerified(userNameBlock);
+    const displayName = nameBlock ? extractDisplayNameFromNameBlock(nameBlock) : (extractDisplayNameFromArticle(article, handle) || '');
+    // 表示名が取れていない時に cond1 が真になって誤爆しないようガード
+    const cond1 = !!displayName && !hasJapanese(displayName);
+    const cond2 = isVerifiedFrom(nameBlock || article);
 
     if (!cond1 || !cond2) {
-      processedHandles.add(handle);
+      if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
       return;
     }
 
-    // プロフィール情報取得（ホバーカード）
-    let cached = profileCache.get(handle);
-    if (!cached || (Date.now() - cached.ts) > 10 * 60 * 1000) {
-      const profileLink = findProfileLink(userNameBlock, handle) || userNameBlock.querySelector('a[href^="/"]');
-      const { bio, profileText } = await readProfileFromHoverCard(profileLink);
-      cached = { bio, profileText, ts: Date.now() };
-      profileCache.set(handle, cached);
-      // 少し間隔を開ける（UI安定化）
-      await sleep(120);
+    const handleKey = String(handle).toLowerCase();
+    const attempts = (handleAttempts.get(handleKey) || 0) + 1;
+    handleAttempts.set(handleKey, attempts);
+
+    const cached = profileCache.get(handleKey);
+    if (!cached || !cached.profileText) {
+      if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
+      return;
     }
 
-    const bio = cached.bio || '';
     const profileText = cached.profileText || '';
+    const bio = cached.bio || '';
 
-    // 条件3: プロフィール(bio)に "Web3" "Crypto" "AI" のいずれかが含まれている
-    const cond3 = includesAnyKeyword(bio);
-
-    // 条件4: プロフィール（ユーザー入力部分）に日本語が含まれていない
+    const cond3 = includesAnyKeyword(profileText);
     const cond4 = !hasJapanese(profileText);
-
-    const shouldAct = cond1 && cond2 && cond3 && cond4;
-
-    if (!shouldAct) {
+    if (!(cond1 && cond2 && cond3 && cond4)) {
       processedHandles.add(handle);
       return;
     }
@@ -292,24 +410,17 @@
     }
 
     log(`${ACTION} 実行`, `@${handle}`, reason);
-
     const opened = await openTweetMenu(article);
     if (!opened) {
-      log('メニューを開けませんでした', `@${handle}`);
       processedHandles.add(handle);
       return;
     }
 
     if (ACTION === 'mute') {
-      const ok = await clickMenuItemByText(['ミュート', 'Mute']);
-      if (!ok) log('ミュート項目が見つかりません', `@${handle}`);
+      await clickMenuItemByText(['ミュート', 'Mute']);
     } else {
       const ok = await clickMenuItemByText(['ブロック', 'Block']);
-      if (!ok) {
-        log('ブロック項目が見つかりません', `@${handle}`);
-      } else {
-        await confirmDialogIfNeeded('block');
-      }
+      if (ok) await confirmBlockIfNeeded();
     }
 
     processedHandles.add(handle);
@@ -331,7 +442,6 @@
 
       const articles = getTweetArticles(root);
       for (const a of articles) {
-        // 処理負荷とUI安定のため逐次
         await evaluateAndActOnArticle(a);
       }
     } catch (e) {
@@ -341,15 +451,13 @@
     }
   }
 
-  // 変更監視（返信が追加ロードされるため）
   const mo = new MutationObserver(() => {
-    // 連打を避けて軽く遅延
-    setTimeout(scanLoop, 250);
+    setTimeout(scanLoop, 200);
   });
-  mo.observe(document.body, { childList: true, subtree: true });
+  mo.observe(document.documentElement, { childList: true, subtree: true });
 
-  // 初回
   setTimeout(scanLoop, 1200);
+  setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
   log('loaded', { ACTION, DRY_RUN, KEYWORDS });
 })();
