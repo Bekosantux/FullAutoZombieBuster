@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         FullAutoZombieBuster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.2.0
-// @description  返信欄（会話タイムライン）で、次の条件を満たすアカウントを自動でブロック/ミュートします。 1. 表示名に日本語が含まれていない  2. 認証済みアカウントである  3. プロフィールに特定の文字列が含まれている  4. プロフィールに日本語が含まれていない
+// @version      1.3.0
+// @description  返信欄（会話タイムライン）で、条件を満たすアカウントを自動でブロック/ミュートします。 
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://github.com/Bekosantux/FullAutoZombieBuster/raw/main/script.user.js
+// @downloadURL  https://github.com/Bekosantux/FullAutoZombieBuster/raw/main/script.user.js
 // ==/UserScript==
 
 (() => {
@@ -15,17 +17,21 @@
   // ===== 設定 =====
   const ACTION = 'block'; // 'mute' または 'block'
   const DRY_RUN = false; // trueの場合はログのみ
-  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing']; // 小文字大文字は区別されません
+  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH']; // 小文字大文字は区別されません
 
-  // 条件1〜4の個別ON/OFF
+  // 一般条件1〜4の個別ON/OFF
   const ENABLE_COND1 = true; // 1) 表示名に日本語が含まれていない
   const ENABLE_COND2 = true; // 2) 認証済み
   const ENABLE_COND3 = true; // 3) キーワード（プロフィール/表示名）
   const ENABLE_COND4 = true; // 4) プロフィールに日本語が含まれていない
 
-  // 追加ルール: 認証済み かつ プロフィールに日本語が含まれない場合、他条件によらずブロック
+  // 特殊条件A: 認証済み&プロフィールに日本語が含まれない場合、他条件によらずブロック
   // 誤爆の可能性があるためデフォルトでは無効
-  const ENABLE_COND2A = false;
+  const ENABLE_CONDA = false;
+
+  // 特殊条件B: フォロー中のユーザーはあらゆる条件から除外（何もしない）
+  // 安全面を優先するためデフォルトで有効
+  const ENABLE_CONDB = true;
 
   const SCAN_INTERVAL_MS = 1000;
   const PROFILE_MAX_RETRIES = 6;
@@ -76,7 +82,7 @@
   }
 
   // ===== プロフィールキャッシュ =====
-  // lower(handle) -> { bio, profileText, ts }
+  // lower(handle) -> { bio, profileText, following, ts }
   const profileCache = new Map();
 
   function pickFirstString(...candidates) {
@@ -137,12 +143,21 @@
       expandedUrl
     ));
 
+    const followingRaw =
+      obj.following ??
+      legacy?.following ??
+      rLegacy?.following ??
+      result?.following;
+    const following = (typeof followingRaw === 'boolean') ? followingRaw : undefined;
+
     const profileText = buildProfileText({ bio, location, url });
-    if (!profileText) return false;
+    // プロフィールが空でも「フォロー中」判定のために following だけ保存したい
+    if (!profileText && following === undefined) return false;
 
     profileCache.set(String(screenName).toLowerCase(), {
       bio,
       profileText,
+      following,
       ts: Date.now(),
     });
     return true;
@@ -384,38 +399,54 @@
     const cond1 = ENABLE_COND1 ? rawCond1 : true;
     const cond2 = ENABLE_COND2 ? rawCond2 : true;
 
-    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_COND2A;
+    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDA || ENABLE_CONDB;
     const handleKey = String(handle).toLowerCase();
 
     let profileText = '';
     let bio = '';
+    let isFollowing = false;
     if (needsProfile) {
       const attempts = (handleAttempts.get(handleKey) || 0) + 1;
       handleAttempts.set(handleKey, attempts);
 
       const cached = profileCache.get(handleKey);
-      if (!cached || !cached.profileText) {
+      if (!cached) {
         if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
         return;
       }
+
+      // 条件B（フォロー中除外）
+      isFollowing = cached.following === true;
+      if (ENABLE_CONDB && isFollowing) {
+        processedHandles.add(handle);
+        return;
+      }
+
       profileText = cached.profileText || '';
       bio = cached.bio || '';
+
+      // 条件3/4/A が有効な場合、プロフィール文が取れない相手は判定不能として待つ
+      const needsProfileText = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDA;
+      if (needsProfileText && !profileText) {
+        if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
+        return;
+      }
     }
 
-    const rawCond3 = includesAnyKeyword(`${profileText}\n${displayName}`);
-    const rawCond4 = !hasJapanese(profileText);
+    const hasProfileText = !!profileText;
+    const rawCond3 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
+    const rawCond4 = hasProfileText ? !hasJapanese(profileText) : false;
     const cond3 = ENABLE_COND3 ? rawCond3 : true;
     const cond4 = ENABLE_COND4 ? rawCond4 : true;
 
-    const rawCond2A = rawCond2 && rawCond4;
-    const cond2A = ENABLE_COND2A && rawCond2A;
+    const rawCondA = rawCond2 && rawCond4;
+    const condA = ENABLE_CONDA && rawCondA;
 
-    const shouldAct = cond2A || (cond1 && cond2 && cond3 && cond4);
+    const shouldAct = condA || (cond1 && cond2 && cond3 && cond4);
 
     if (!shouldAct) {
-      // 2_a が有効な間は、表示名がまだ取れていない等の揺れで取りこぼさないよう、
-      // 早期に processed に入れる判定を控えめにする。
-      if (!ENABLE_COND2A && (!cond1 || !cond2)) {
+      // 特殊条件Aが無効な場合のみ、表示名/認証の早期除外で負荷を下げる
+      if (!ENABLE_CONDA && (!cond1 || !cond2)) {
         if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
         return;
       }
@@ -429,23 +460,25 @@
         cond2: ENABLE_COND2,
         cond3: ENABLE_COND3,
         cond4: ENABLE_COND4,
-        cond2A: ENABLE_COND2A,
+        condA: ENABLE_CONDA,
+        condB: ENABLE_CONDB,
       },
       raw: {
         cond1: rawCond1,
         cond2: rawCond2,
         cond3: rawCond3,
         cond4: rawCond4,
-        cond2A: rawCond2A,
+        condA: rawCondA,
+        condB: isFollowing,
       },
       cond1, cond2, cond3, cond4,
-      cond2A,
+      condA,
       displayName,
       bio: bio.slice(0, 140),
       profileText: profileText.slice(0, 140),
     };
 
-    const actionToRun = cond2A ? 'block' : ACTION;
+    const actionToRun = condA ? 'block' : ACTION;
 
     if (DRY_RUN) {
       log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
@@ -503,5 +536,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_COND2A });
+  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_CONDA, ENABLE_CONDB });
 })();
