@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         FullAutoZombieBuster
+// @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
 // @version      1.4.3
-// @description  返信欄（会話タイムライン）で、条件を満たすアカウントを自動でブロック/ミュートします。 
+// @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-start
