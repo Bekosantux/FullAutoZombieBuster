@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FullAutoZombieBuster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.4.2
+// @version      1.4.3
 // @description  返信欄（会話タイムライン）で、条件を満たすアカウントを自動でブロック/ミュートします。 
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -47,20 +47,22 @@
   // 簡体字に頻出の漢字
   const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资]/;
 
+  const hasSimplified = (text) => SIMPLIFIED_ONLY_RE.test(String(text || ''));
+
   const hasJapanese = (text) => {
     if (!text) return false;
     try {
       const t = String(text);
+      // 簡体字リストの字が1つでもあれば最優先で「日本語ではない」扱い
+      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
       // かながあるなら日本語扱い
       if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(t)) return true;
-      // かな無しで簡体字特有の字があるなら日本語扱いしない
-      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
       // それ以外の漢字は日本語扱い
       return /[\p{Script=Han}]/u.test(t);
     } catch {
       const t = String(text);
-      if (/[ぁ-んァ-ン]/.test(t)) return true;
       if (SIMPLIFIED_ONLY_RE.test(t)) return false;
+      if (/[ぁ-んァ-ン]/.test(t)) return true;
       return /[一-龥]/.test(t);
     }
   };
@@ -535,7 +537,10 @@
     const cond3 = ENABLE_COND3 ? rawCond3 : true;
     const cond4 = ENABLE_COND4 ? rawCond4 : true;
 
-    const rawCondB = rawCond2 && rawCond1 && rawCond4;
+    const simplifiedInName = hasSimplified(displayName);
+    const simplifiedInProfile = hasSimplified(profileText);
+    // 条件B: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
+    const rawCondB = rawCond2 && rawCond4 && (rawCond1 || simplifiedInName || simplifiedInProfile);
     const rawCondC = rawCond2 && profileEmpty;
     const condB = ENABLE_CONDB && rawCondB;
     const condC = ENABLE_CONDC && rawCondC;
