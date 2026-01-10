@@ -1,7 +1,6 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
-// @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.6.0
+// @version      1.6.1
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -31,6 +30,7 @@
     const COND_1 = true; // 1) 表示名に日本語が含まれていない
     const COND_2 = true; // 2) Bioに日本語が含まれていない
     const COND_3 = true; // 3) キーワード（Bio+表示名）
+    const COND_4 = true; // 4) そのユーザーの返信に日本語が含まれている
 
   // ----- 優先条件（強制処理）-----
   // 条件を満たす場合、通常条件に関係なく強制的に処理対象とする
@@ -49,7 +49,7 @@
     const EXCLUDE_HIGH_FOLLOWERS = true;
     const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000; // ここを変更すると閾値を変えられます
 
-  const SCAN_INTERVAL_MS = 1000;
+  const SCAN_INTERVAL_MS = 100;
   const PROFILE_MAX_RETRIES = 6;
 
   // ===== 共通 =====
@@ -404,6 +404,17 @@
     return '';
   }
 
+  function extractReplyTextFromArticle(article) {
+    try {
+      const blocks = Array.from(article?.querySelectorAll?.('[data-testid="tweetText"]') || []);
+      if (!blocks.length) return '';
+      const t = norm(blocks.map((b) => (b?.textContent || '')).join('\n'));
+      return t;
+    } catch {
+      return '';
+    }
+  }
+
   function isVerifiedFrom(container) {
     if (!container) return false;
     if (container.querySelector('[data-testid^="icon-verified"]')) return true;
@@ -594,6 +605,7 @@
 
     const displayName = nameBlock ? extractDisplayNameFromNameBlock(nameBlock) : (extractDisplayNameFromArticle(article, handle) || '');
     const verified = isVerifiedFrom(nameBlock || article);
+    const replyText = extractReplyTextFromArticle(article);
 
     // 前提ゲート: 認証済みのみを処理対象にする
     if (REQUIRE_VERIFIED && !verified) {
@@ -605,6 +617,22 @@
     // 表示名が取れていない時の条件1ガード
     const rawCond1 = !!displayName && !hasJapanese(displayName);
     const cond1 = COND_1 ? rawCond1 : true;
+
+    // 返信テキストが取れていない時の条件4ガード
+    const rawCond4 = !!replyText && hasJapanese(replyText);
+    const cond4 = COND_4 ? rawCond4 : true;
+
+    if (COND_4 && !replyText) {
+      const n = handleSeenCount.get(handleKey) || 0;
+      if (shouldDebugWait(n)) {
+        debugEval(handle, { outcome: 'wait_reply_text', permalink, handleKey, verified, tries: n, max: 3 });
+      }
+      if (n >= 3) {
+        debugEval(handle, { outcome: 'give_up_reply_text', permalink, handleKey, verified, tries: n, max: 3 });
+        processedHandles.add(handleKey);
+      }
+      return;
+    }
 
     const needsProfile = COND_2 || COND_3 || COND_A;
 
@@ -696,7 +724,7 @@
     const trigA = COND_A && rawCondA;
 
     // 通常条件
-    const trigNormal = (cond1 && cond2 && cond3);
+    const trigNormal = (cond1 && cond2 && cond3 && cond4);
 
     const shouldAct = trigA || trigNormal;
 
@@ -719,6 +747,7 @@
         cond1: rawCond1,
         cond2: rawCond2,
         cond3: rawCond3,
+        cond4: rawCond4,
         condA: rawCondA,
       },
       trig: { A: trigA, normal: trigNormal },
@@ -737,12 +766,14 @@
         verified,
         cond2: rawCond2,
         cond3: rawCond3,
+        cond4: rawCond4,
         followStatus: 'unknown',
         condA: rawCondA,
       },
       displayName,
       bio: bio.slice(0, 140),
       profileText: profileText.slice(0, 140),
+      replyText: replyText.slice(0, 140),
       profileEmpty,
     };
 
@@ -851,5 +882,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_A, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
+  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
