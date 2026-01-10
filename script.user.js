@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.6
+// @version      1.6.0
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -15,10 +15,12 @@
   'use strict';
 
   // ===== 設定 =====
-  const ACTION = 'block'; // 'mute' または 'block'
-  const DRY_RUN = false; // trueの場合はログのみ
-  const DEBUG_LOG_EVALUATION = false; // trueの場合、判定が確定した全ユーザーの評価結果をログ出力
-  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH', 'MeMeMax']; // 小文字大文字は区別されません
+    const ACTION = 'block'; // 'mute' または 'block'
+    const DRY_RUN = false; // trueの場合はログのみ
+    const DEBUG_LOG_EVALUATION = false; // trueの場合、判定が確定した全ユーザーの評価結果をログ出力
+    const KEYWORDS = ['Web3', 'Web 3', 'Crypto', 'NFT', 'DeFi',
+                     ,'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing'
+                     ,'BTC', 'Bitcoin', 'ETH', 'MemeMax', '$']; // 小文字大文字は区別されません
 
   // 前提: 認証済み（Verified）アカウントのみを処理対象にする
     const REQUIRE_VERIFIED = true;
@@ -27,8 +29,8 @@
   // 以下の条件をすべて満たす場合に処理対象とする
 
     const COND_1 = true; // 1) 表示名に日本語が含まれていない
-    const COND_2 = true; // 2) キーワード（Bio+表示名）
-    const COND_3 = true; // 3) Bioに日本語が含まれていない
+    const COND_2 = true; // 2) Bioに日本語が含まれていない
+    const COND_3 = true; // 3) キーワード（Bio+表示名）
 
   // ----- 優先条件（強制処理）-----
   // 条件を満たす場合、通常条件に関係なく強制的に処理対象とする
@@ -36,10 +38,6 @@
     // 優先条件A（強制処理）: 認証済み & Bio空欄
     // 誤爆の可能性があるためデフォルトでは無効
     const COND_A = false;
-
-    // 優先条件B（強制処理）: 認証済み &（Bioが日本語なし）
-    // 誤爆の可能性があるためデフォルトでは無効
-    const COND_B = false;
 
   // ----- 除外設定 -----
   // 対象のユーザーは処理対象から除外する（優先条件を含む）
@@ -94,8 +92,6 @@
 
   // 簡体字に頻出の漢字
   const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资盈币]/;
-
-  const hasSimplified = (text) => SIMPLIFIED_ONLY_RE.test(String(text || ''));
 
   const hasJapanese = (text) => {
     if (!text) return false;
@@ -610,7 +606,7 @@
     const rawCond1 = !!displayName && !hasJapanese(displayName);
     const cond1 = COND_1 ? rawCond1 : true;
 
-    const needsProfile = COND_2 || COND_3 || COND_A || COND_B;
+    const needsProfile = COND_2 || COND_3 || COND_A;
 
     // フォロワー数が多いアカウントは除外
     if (EXCLUDE_HIGH_FOLLOWERS) {
@@ -658,12 +654,12 @@
       bio = cached.bio || '';
       profileEmpty = cached.profileEmpty === true;
 
-      // 条件2/3/B が有効なのにBio文が取れない場合は待つ（ただし優先条件A成立なら待たない）
+      // 条件2/3 が有効なのにBio文が取れない場合は待つ（ただし優先条件A成立なら待たない）
       const hasProfileTextNow = !!profileText;
       const rawCondANow = verified && profileEmpty;
       const condANow = COND_A && rawCondANow;
 
-      const needsNonEmptyProfileText = COND_2 || COND_3 || COND_B;
+      const needsNonEmptyProfileText = COND_2 || COND_3;
       if (!condANow && needsNonEmptyProfileText && !hasProfileTextNow) {
         if (shouldDebugWait(attempts)) {
           debugEval(handle, {
@@ -690,23 +686,19 @@
     }
 
     const hasProfileText = !!profileText;
-    const rawCond2 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
-    const rawCond3 = hasProfileText ? !hasJapanese(profileText) : false;
+    const rawCond2 = hasProfileText ? !hasJapanese(profileText) : false;
+    const rawCond3 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
     const cond2 = COND_2 ? rawCond2 : true;
     const cond3 = COND_3 ? rawCond3 : true;
 
-    const simplifiedInName = hasSimplified(displayName);
-    const simplifiedInProfile = hasSimplified(profileText);
-    // 優先条件A/B（強制処理）
+    // 優先条件A（強制処理）
     const rawCondA = verified && profileEmpty;
-    const rawCondB = verified && rawCond3 && (rawCond1 || simplifiedInName || simplifiedInProfile);
     const trigA = COND_A && rawCondA;
-    const trigB = COND_B && rawCondB;
 
     // 通常条件
     const trigNormal = (cond1 && cond2 && cond3);
 
-    const shouldAct = trigA || trigB || trigNormal;
+    const shouldAct = trigA || trigNormal;
 
     const evaluation = {
       verified,
@@ -728,9 +720,8 @@
         cond2: rawCond2,
         cond3: rawCond3,
         condA: rawCondA,
-        condB: rawCondB,
       },
-      trig: { A: trigA, B: trigB, normal: trigNormal },
+      trig: { A: trigA, normal: trigNormal },
       shouldAct,
     };
 
@@ -748,7 +739,6 @@
         cond3: rawCond3,
         followStatus: 'unknown',
         condA: rawCondA,
-        condB: rawCondB,
       },
       displayName,
       bio: bio.slice(0, 140),
@@ -756,7 +746,7 @@
       profileEmpty,
     };
 
-    const actionToRun = (trigA || trigB) ? 'execute' : ACTION;
+    const actionToRun = trigA ? 'execute' : ACTION;
 
     const opened = await openTweetMenu(article);
     if (!opened) {
@@ -861,5 +851,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
+  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_A, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
