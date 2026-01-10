@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.5
+// @version      1.5.6
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -27,18 +27,17 @@
   // 以下の条件をすべて満たす場合に処理対象とする
 
     const COND_1 = true; // 1) 表示名に日本語が含まれていない
-    const COND_2 = true; // 2) キーワード（プロフィール+表示名）
-    const COND_3 = true; // 3) プロフィールに日本語が含まれていない
-    const COND_4 = true; // 4) プロフィールが取得できている（空欄でも可）
+    const COND_2 = true; // 2) キーワード（Bio+表示名）
+    const COND_3 = true; // 3) Bioに日本語が含まれていない
 
   // ----- 優先条件（強制処理）-----
   // 条件を満たす場合、通常条件に関係なく強制的に処理対象とする
 
-    // 優先条件A（強制block）: 認証済み & プロフィール空欄
+    // 優先条件A（強制処理）: 認証済み & Bio空欄
     // 誤爆の可能性があるためデフォルトでは無効
     const COND_A = false;
 
-    // 優先条件B（強制block）: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
+    // 優先条件B（強制処理）: 認証済み &（Bioが日本語なし）
     // 誤爆の可能性があるためデフォルトでは無効
     const COND_B = false;
 
@@ -57,7 +56,7 @@
 
   // ===== 共通 =====
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const log = (...args) => console.log('[imp-zombie]', ...args);
+  const log = (...args) => console.log('[Zombie Buster]', ...args);
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
   function getStatusPermalinkFromArticle(article) {
@@ -153,7 +152,7 @@
     return norm([bio, location, url].filter(Boolean).join('\n'));
   }
 
-  // ===== プロフィールキャッシュ =====
+  // ===== Bioキャッシュ =====
   // lower(handle) -> { bio, profileText, profileEmpty, ts }
   const profileCache = new Map();
 
@@ -242,8 +241,8 @@
       expandedUrl
     ));
 
-    // 重要: GraphQLの一部レスポンスは screen_name だけ等「プロフィール項目が未同梱」なことがある。
-    // それを空欄プロフィール扱いにすると、条件Cが暴発する。
+    // 重要: GraphQLの一部レスポンスは screen_name だけ等「Bio項目が未同梱」なことがある。
+    // それを空欄Bio扱いにすると、条件Cが暴発する。
     const profileKnown =
       hasOwn(obj, 'description') || hasOwn(obj, 'location') || hasOwn(obj, 'url') || hasOwn(obj, 'entities') ||
       hasOwn(legacy, 'description') || hasOwn(legacy, 'location') || hasOwn(legacy, 'url') || hasOwn(legacy, 'entities') ||
@@ -253,7 +252,7 @@
     const profileText = buildProfileText({ bio, location, url });
     const profileEmpty = profileKnown && !bio && !location && !url;
 
-    // プロフィール項目が未同梱のオブジェクトはプロフィールキャッシュしない（後続の完全なpayloadを待つ）
+    // Bio項目が未同梱のオブジェクトはBioキャッシュしない（後続の完全なpayloadを待つ）
     if (!profileKnown) return followersCount != null;
 
     profileCache.set(String(screenName).toLowerCase(), { bio, profileText, profileEmpty, ts: Date.now() });
@@ -611,7 +610,7 @@
     const rawCond1 = !!displayName && !hasJapanese(displayName);
     const cond1 = COND_1 ? rawCond1 : true;
 
-    const needsProfile = COND_2 || COND_3 || COND_4 || COND_A || COND_B;
+    const needsProfile = COND_2 || COND_3 || COND_A || COND_B;
 
     // フォロワー数が多いアカウントは除外
     if (EXCLUDE_HIGH_FOLLOWERS) {
@@ -659,7 +658,7 @@
       bio = cached.bio || '';
       profileEmpty = cached.profileEmpty === true;
 
-      // 条件2/3/B が有効なのにプロフィール文が取れない場合は待つ（ただし優先条件A成立なら待たない）
+      // 条件2/3/B が有効なのにBio文が取れない場合は待つ（ただし優先条件A成立なら待たない）
       const hasProfileTextNow = !!profileText;
       const rawCondANow = verified && profileEmpty;
       const condANow = COND_A && rawCondANow;
@@ -693,21 +692,19 @@
     const hasProfileText = !!profileText;
     const rawCond2 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
     const rawCond3 = hasProfileText ? !hasJapanese(profileText) : false;
-    const rawCond4 = (hasProfileText || profileEmpty);
     const cond2 = COND_2 ? rawCond2 : true;
     const cond3 = COND_3 ? rawCond3 : true;
-    const cond4 = COND_4 ? rawCond4 : true;
 
     const simplifiedInName = hasSimplified(displayName);
     const simplifiedInProfile = hasSimplified(profileText);
-    // 優先条件A/B（強制block）
+    // 優先条件A/B（強制処理）
     const rawCondA = verified && profileEmpty;
     const rawCondB = verified && rawCond3 && (rawCond1 || simplifiedInName || simplifiedInProfile);
     const trigA = COND_A && rawCondA;
     const trigB = COND_B && rawCondB;
 
-    // 通常条件（Verified前提のためcond2は廃止）
-    const trigNormal = (cond1 && cond2 && cond3 && cond4);
+    // 通常条件
+    const trigNormal = (cond1 && cond2 && cond3);
 
     const shouldAct = trigA || trigB || trigNormal;
 
@@ -730,7 +727,6 @@
         cond1: rawCond1,
         cond2: rawCond2,
         cond3: rawCond3,
-        cond4: rawCond4,
         condA: rawCondA,
         condB: rawCondB,
       },
@@ -750,7 +746,6 @@
         verified,
         cond2: rawCond2,
         cond3: rawCond3,
-        cond4: rawCond4,
         followStatus: 'unknown',
         condA: rawCondA,
         condB: rawCondB,
@@ -761,7 +756,7 @@
       profileEmpty,
     };
 
-    const actionToRun = (trigA || trigB) ? 'block' : ACTION;
+    const actionToRun = (trigA || trigB) ? 'execute' : ACTION;
 
     const opened = await openTweetMenu(article);
     if (!opened) {
@@ -866,5 +861,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
+  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
