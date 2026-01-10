@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.0
+// @version      1.5.1
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -17,7 +17,8 @@
   // ===== 設定 =====
   const ACTION = 'block'; // 'mute' または 'block'
   const DRY_RUN = false; // trueの場合はログのみ
-  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH']; // 小文字大文字は区別されません
+  const DEBUG_LOG_EVALUATION = false; // trueの場合、判定が確定した全ユーザーの評価結果をログ出力
+  const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH', 'MeMeMax']; // 小文字大文字は区別されません
 
   // 前提: 認証済み（Verified）アカウントのみを処理対象にする
   const REQUIRE_VERIFIED = true;
@@ -50,6 +51,11 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const log = (...args) => console.log('[imp-zombie]', ...args);
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
+  const debugEval = (handle, payload) => {
+    if (!DEBUG_LOG_EVALUATION) return;
+    log('eval', `@${handle}`, payload);
+  };
 
   // 簡体字に頻出の漢字
   const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资]/;
@@ -545,6 +551,7 @@
       const m = userMetricsCache.get(handleKey);
       const fc = m?.followersCount;
       if (typeof fc === 'number' && Number.isFinite(fc) && fc >= EXCLUDE_HIGH_FOLLOWERS_MIN) {
+        debugEval(handle, { outcome: 'excluded_high_followers', verified, followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
         log('skip (high follower count)', `@${handle}`, { followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
         processedHandles.add(handle);
         return;
@@ -560,7 +567,10 @@
 
       const cached = profileCache.get(handleKey);
       if (!cached) {
-        if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
+        if (attempts >= PROFILE_MAX_RETRIES) {
+          debugEval(handle, { outcome: 'give_up_profile', verified, attempts, max: PROFILE_MAX_RETRIES });
+          processedHandles.add(handle);
+        }
         return;
       }
 
@@ -575,7 +585,10 @@
 
       const needsNonEmptyProfileText = COND_2 || COND_3 || COND_B;
       if (!condANow && needsNonEmptyProfileText && !hasProfileTextNow) {
-        if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
+        if (attempts >= PROFILE_MAX_RETRIES) {
+          debugEval(handle, { outcome: 'give_up_profile_text', verified, attempts, max: PROFILE_MAX_RETRIES });
+          processedHandles.add(handle);
+        }
         return;
       }
     }
@@ -601,7 +614,26 @@
 
     const shouldAct = trigA || trigB || trigNormal;
 
+    const evaluation = {
+      verified,
+      displayName: displayName.slice(0, 80),
+      profileEmpty,
+      hasProfileText,
+      followersCount: userMetricsCache.get(handleKey)?.followersCount,
+      raw: {
+        cond1: rawCond1,
+        cond2: rawCond2,
+        cond3: rawCond3,
+        cond4: rawCond4,
+        condA: rawCondA,
+        condB: rawCondB,
+      },
+      trig: { A: trigA, B: trigB, normal: trigNormal },
+      shouldAct,
+    };
+
     if (!shouldAct) {
+      debugEval(handle, { ...evaluation, outcome: 'skip_no_match' });
       processedHandles.add(handle);
       return;
     }
@@ -627,6 +659,7 @@
 
     const opened = await openTweetMenu(article);
     if (!opened) {
+      debugEval(handle, { ...evaluation, outcome: 'skip_menu_open_failed', action: actionToRun });
       processedHandles.add(handle);
       return;
     }
@@ -637,6 +670,7 @@
       reason.raw.followStatus = followStatus;
 
       if (followStatus === 'followed') {
+        debugEval(handle, { ...evaluation, outcome: 'excluded_followed', followStatus, action: actionToRun });
         log('skip (followed user)', `@${handle}`);
         await closeMenuIfOpen();
         await waitMenuClosed(800);
@@ -653,12 +687,16 @@
         await closeMenuIfOpen();
         await waitMenuClosed(800);
         // 何度もunknownが続く場合はキャンセル
-        if (n >= 3) processedHandles.add(handle);
+        if (n >= 3) {
+          debugEval(handle, { ...evaluation, outcome: 'give_up_follow_unknown', followStatus, tries: n, action: actionToRun });
+          processedHandles.add(handle);
+        }
         return;
       }
     }
 
     if (DRY_RUN) {
+      debugEval(handle, { ...evaluation, outcome: 'dry_run', action: actionToRun, followStatus: reason.raw.followStatus });
       log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
       await closeMenuIfOpen();
       await waitMenuClosed(800);
@@ -666,6 +704,7 @@
       return;
     }
 
+    debugEval(handle, { ...evaluation, outcome: 'execute', action: actionToRun, followStatus: reason.raw.followStatus });
     log(`${actionToRun} 実行`, `@${handle}`, reason);
 
     if (actionToRun === 'mute') {
@@ -711,5 +750,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
+  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
