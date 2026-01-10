@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.4
+// @version      1.5.5
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -44,7 +44,7 @@
 
   // ----- 除外設定 -----
   // 対象のユーザーは処理対象から除外する（優先条件を含む）
-    
+
     // 除外: フォロー中のユーザーはあらゆる条件から除外
     const EXCLUDE_FOLLOWED = true;
 
@@ -102,17 +102,23 @@
     if (!text) return false;
     try {
       const t = String(text);
-      // 簡体字リストの字が1つでもあれば最優先で「日本語ではない」扱い
-      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
       // かながあるなら日本語扱い
       if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(t)) return true;
-      // それ以外の漢字は日本語扱い
-      return /[\p{Script=Han}]/u.test(t);
+
+      // かな無しの場合は、漢字があるかを確認する
+      const hasHan = /[\p{Script=Han}]/u.test(t);
+      if (!hasHan) return false;
+
+      // 漢字がある場合、簡体字特有の字があれば日本語扱いしない
+      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
+      return true;
     } catch {
       const t = String(text);
-      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
       if (/[ぁ-んァ-ン]/.test(t)) return true;
-      return /[一-龥]/.test(t);
+      const hasHan = /[一-龥]/.test(t);
+      if (!hasHan) return false;
+      if (SIMPLIFIED_ONLY_RE.test(t)) return false;
+      return true;
     }
   };
 
