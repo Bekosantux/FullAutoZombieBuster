@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
-// @version      1.6.1
+// @version      1.6.2
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -47,7 +47,10 @@
 
     // 除外: フォロワー数が一定以上のアカウントは除外する
     const EXCLUDE_HIGH_FOLLOWERS = true;
-    const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000; // ここを変更すると閾値を変えられます
+    const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000;
+
+    // 除外: 表示名またはBioに韓国語（ハングル）が含まれる場合は除外
+    const EXCLUDE_KOREAN = true;
 
   const SCAN_INTERVAL_MS = 100;
   const PROFILE_MAX_RETRIES = 6;
@@ -91,7 +94,7 @@
   };
 
   // 簡体字に頻出の漢字
-  const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资盈币]/;
+  const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简兴诗记爱资币]/;
 
   const hasJapanese = (text) => {
     if (!text) return false;
@@ -114,6 +117,16 @@
       if (!hasHan) return false;
       if (SIMPLIFIED_ONLY_RE.test(t)) return false;
       return true;
+    }
+  };
+
+  const hasKorean = (text) => {
+    if (!text) return false;
+    try {
+      return /[\p{Script=Hangul}]/u.test(String(text));
+    } catch {
+      // Fallback: Hangul Jamo + Compatibility Jamo + Syllables + Extended-A/B
+      return /[\u1100-\u11FF\u3130-\u318F\uA960-\uA97F\uAC00-\uD7A3\uD7B0-\uD7FF]/.test(String(text));
     }
   };
 
@@ -614,6 +627,14 @@
       return;
     }
 
+    // 除外: 表示名に韓国語が含まれる場合は除外（Bio待ちを避けるため先に判定）
+    if (EXCLUDE_KOREAN && displayName && hasKorean(displayName)) {
+      debugEval(handle, { outcome: 'excluded_korean', permalink, handleKey, verified, koreanIn: 'displayName', displayName: displayName.slice(0, 80) });
+      log('skip (korean detected)', `@${handle}`, { koreanIn: 'displayName' });
+      processedHandles.add(handleKey);
+      return;
+    }
+
     // 表示名が取れていない時の条件1ガード
     const rawCond1 = !!displayName && !hasJapanese(displayName);
     const cond1 = COND_1 ? rawCond1 : true;
@@ -634,7 +655,7 @@
       return;
     }
 
-    const needsProfile = COND_2 || COND_3 || COND_A;
+    const needsProfile = COND_2 || COND_3 || COND_A || EXCLUDE_KOREAN;
 
     // フォロワー数が多いアカウントは除外
     if (EXCLUDE_HIGH_FOLLOWERS) {
@@ -711,6 +732,14 @@
         }
         return;
       }
+    }
+
+    // 除外: Bioに韓国語が含まれる場合は除外
+    if (EXCLUDE_KOREAN && bio && hasKorean(bio)) {
+      debugEval(handle, { outcome: 'excluded_korean', permalink, handleKey, verified, koreanIn: 'bio', snippets: { bio: bio.slice(0, 140) } });
+      log('skip (korean detected)', `@${handle}`, { koreanIn: 'bio' });
+      processedHandles.add(handleKey);
+      return;
     }
 
     const hasProfileText = !!profileText;
@@ -882,5 +911,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
+  log('loaded', { ACTION, DRY_RUN, DEBUG_LOG_EVALUATION, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, EXCLUDE_FOLLOWED, EXCLUDE_KOREAN, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
