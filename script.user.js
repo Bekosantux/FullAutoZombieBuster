@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.2
+// @version      1.5.3
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -52,9 +52,26 @@
   const log = (...args) => console.log('[imp-zombie]', ...args);
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
+  function getStatusPermalinkFromArticle(article) {
+    try {
+      const a = article?.querySelector?.('a[href*="/status/"]');
+      const href = a?.getAttribute?.('href') || '';
+      if (!href) return '';
+      return new URL(href, location.origin).toString();
+    } catch {
+      return '';
+    }
+  }
+
+  const shouldDebugWait = (n) => (n === 1 || n === PROFILE_MAX_RETRIES || (n % 2 === 0));
+
   const debugEval = (handle, payload) => {
     if (!DEBUG_LOG_EVALUATION) return;
-    log('eval', `@${handle}`, payload);
+    const base = {
+      ts: new Date().toISOString(),
+      path: location.pathname,
+    };
+    log('eval', `@${handle || '?'}`, { ...base, ...payload });
   };
 
   // 簡体字に頻出の漢字
@@ -539,9 +556,13 @@
     const nameBlock = extractUserNameBlock(article);
 
     const handle = extractHandleFromLinks(nameBlock) || extractHandleFromLinks(article);
-    if (!handle) return;
+    const permalink = getStatusPermalinkFromArticle(article);
+    if (!handle) {
+      debugEval('?', { outcome: 'skip_no_handle', permalink });
+      return;
+    }
     if (timelineOwnerHandleKey && String(handle).toLowerCase() === timelineOwnerHandleKey) {
-      debugEval(handle, { outcome: 'excluded_timeline_owner' });
+      debugEval(handle, { outcome: 'excluded_timeline_owner', permalink, timelineOwnerHandleKey });
       processedHandles.add(handle);
       return;
     }
@@ -554,6 +575,7 @@
 
     // 前提ゲート: 認証済みのみを処理対象にする
     if (REQUIRE_VERIFIED && !verified) {
+      debugEval(handle, { outcome: 'skip_not_verified', permalink });
       if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
       return;
     }
@@ -570,7 +592,7 @@
       const m = userMetricsCache.get(handleKey);
       const fc = m?.followersCount;
       if (typeof fc === 'number' && Number.isFinite(fc) && fc >= EXCLUDE_HIGH_FOLLOWERS_MIN) {
-        debugEval(handle, { outcome: 'excluded_high_followers', verified, followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
+        debugEval(handle, { outcome: 'excluded_high_followers', permalink, verified, followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
         log('skip (high follower count)', `@${handle}`, { followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
         processedHandles.add(handle);
         return;
@@ -586,8 +608,21 @@
 
       const cached = profileCache.get(handleKey);
       if (!cached) {
+        if (shouldDebugWait(attempts)) {
+          debugEval(handle, {
+            outcome: 'wait_profile_cache',
+            permalink,
+            verified,
+            attempts,
+            max: PROFILE_MAX_RETRIES,
+            cache: {
+              profile: false,
+              followersCount: userMetricsCache.get(handleKey)?.followersCount,
+            },
+          });
+        }
         if (attempts >= PROFILE_MAX_RETRIES) {
-          debugEval(handle, { outcome: 'give_up_profile', verified, attempts, max: PROFILE_MAX_RETRIES });
+          debugEval(handle, { outcome: 'give_up_profile', permalink, verified, attempts, max: PROFILE_MAX_RETRIES });
           processedHandles.add(handle);
         }
         return;
@@ -604,8 +639,23 @@
 
       const needsNonEmptyProfileText = COND_2 || COND_3 || COND_B;
       if (!condANow && needsNonEmptyProfileText && !hasProfileTextNow) {
+        if (shouldDebugWait(attempts)) {
+          debugEval(handle, {
+            outcome: 'wait_profile_text',
+            permalink,
+            verified,
+            attempts,
+            max: PROFILE_MAX_RETRIES,
+            profileEmpty,
+            hasProfileTextNow,
+            cache: {
+              profile: true,
+              followersCount: userMetricsCache.get(handleKey)?.followersCount,
+            },
+          });
+        }
         if (attempts >= PROFILE_MAX_RETRIES) {
-          debugEval(handle, { outcome: 'give_up_profile_text', verified, attempts, max: PROFILE_MAX_RETRIES });
+          debugEval(handle, { outcome: 'give_up_profile_text', permalink, verified, attempts, max: PROFILE_MAX_RETRIES });
           processedHandles.add(handle);
         }
         return;
@@ -638,7 +688,16 @@
       displayName: displayName.slice(0, 80),
       profileEmpty,
       hasProfileText,
-      followersCount: userMetricsCache.get(handleKey)?.followersCount,
+      permalink,
+      handleKey,
+      cache: {
+        profile: profileCache.has(handleKey),
+        followersCount: userMetricsCache.get(handleKey)?.followersCount,
+      },
+      snippets: {
+        bio: bio.slice(0, 140),
+        profileText: profileText.slice(0, 140),
+      },
       raw: {
         cond1: rawCond1,
         cond2: rawCond2,
@@ -702,6 +761,9 @@
         const k = String(handle).toLowerCase();
         const n = (followCheckAttempts.get(k) || 0) + 1;
         followCheckAttempts.set(k, n);
+        if (shouldDebugWait(n)) {
+          debugEval(handle, { ...evaluation, outcome: 'wait_follow_unknown', followStatus, tries: n, action: actionToRun });
+        }
         log('skip (follow status unknown)', `@${handle}`, { tries: n });
         await closeMenuIfOpen();
         await waitMenuClosed(800);
