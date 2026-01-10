@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.4.3
+// @version      1.5.0
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -19,22 +19,29 @@
   const DRY_RUN = false; // trueの場合はログのみ
   const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH']; // 小文字大文字は区別されません
 
-  // 一般条件1〜4の個別ON/OFF
-  const ENABLE_COND1 = true; // 1) 表示名に日本語が含まれていない
-  const ENABLE_COND2 = true; // 2) 認証済み
-  const ENABLE_COND3 = true; // 3) キーワード（プロフィール+表示名）
-  const ENABLE_COND4 = true; // 4) プロフィールに日本語が含まれていない
+  // 前提: 認証済み（Verified）アカウントのみを処理対象にする
+  const REQUIRE_VERIFIED = true;
 
-  // 特殊条件A: フォロー中のユーザーはあらゆる条件から除外
-  const ENABLE_CONDA = true;
+  // 通常条件（Verified前提の上で判定）
+  const COND_1 = true; // 1) 表示名に日本語が含まれていない
+  const COND_2 = true; // 2) キーワード（プロフィール+表示名）
+  const COND_3 = true; // 3) プロフィールに日本語が含まれていない
+  const COND_4 = true; // 4) プロフィールが取得できている（空欄でも可）
 
-  // 特殊条件B: 認証済み &（表示名+プロフィール）に日本語が含まれない場合、他条件によらずブロック
+  // 除外: フォロー中のユーザーはあらゆる条件から除外
+  const EXCLUDE_FOLLOWED = true;
+
+  // 優先条件B（強制block）: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
   // 誤爆の可能性があるためデフォルトでは無効
-  const ENABLE_CONDB = false;
+  const COND_B = false;
 
-  // 特殊条件C: 認証済み&プロフィールが空欄の場合、他条件によらずブロック
+  // 優先条件A（強制block）: 認証済み & プロフィール空欄
   // 誤爆の可能性があるためデフォルトでは無効
-  const ENABLE_CONDC = false;
+  const COND_A = false;
+
+  // 除外: フォロワー数が一定以上のアカウントは除外する（大きいアカウントの誤爆回避）
+  const EXCLUDE_HIGH_FOLLOWERS = true;
+  const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000; // ここを変更すると閾値を変えられます
 
   const SCAN_INTERVAL_MS = 1000;
   const PROFILE_MAX_RETRIES = 6;
@@ -102,6 +109,9 @@
   // lower(handle) -> { bio, profileText, profileEmpty, ts }
   const profileCache = new Map();
 
+  // lower(handle) -> { followersCount, ts }
+  const userMetricsCache = new Map();
+
   const hasOwn = (obj, key) => !!obj && Object.prototype.hasOwnProperty.call(obj, key);
 
   function pickFirstString(...candidates) {
@@ -109,6 +119,14 @@
       if (typeof c === 'string' && c.trim()) return c;
     }
     return '';
+  }
+
+  function pickFirstNumber(...candidates) {
+    for (const c of candidates) {
+      if (typeof c === 'number' && Number.isFinite(c)) return c;
+      if (typeof c === 'string' && c.trim() && Number.isFinite(Number(c))) return Number(c);
+    }
+    return null;
   }
 
   function ingestPossibleUserObject(obj) {
@@ -133,6 +151,20 @@
       rUser?.username
     );
     if (!screenName) return false;
+
+    const followersCount = pickFirstNumber(
+      obj.followers_count,
+      obj.followersCount,
+      legacy?.followers_count,
+      legacy?.followersCount,
+      rLegacy?.followers_count,
+      rLegacy?.followersCount,
+      result?.followers_count,
+      result?.followersCount
+    );
+    if (followersCount != null) {
+      userMetricsCache.set(String(screenName).toLowerCase(), { followersCount, ts: Date.now() });
+    }
 
     const bio = norm(pickFirstString(
       obj.description,
@@ -173,8 +205,8 @@
     const profileText = buildProfileText({ bio, location, url });
     const profileEmpty = profileKnown && !bio && !location && !url;
 
-    // プロフィール項目が未同梱のオブジェクトはキャッシュしない（後続の完全なpayloadを待つ）
-    if (!profileKnown) return false;
+    // プロフィール項目が未同梱のオブジェクトはプロフィールキャッシュしない（後続の完全なpayloadを待つ）
+    if (!profileKnown) return followersCount != null;
 
     profileCache.set(String(screenName).toLowerCase(), { bio, profileText, profileEmpty, ts: Date.now() });
     return true;
@@ -493,14 +525,31 @@
     handleSeenCount.set(handle, (handleSeenCount.get(handle) || 0) + 1);
 
     const displayName = nameBlock ? extractDisplayNameFromNameBlock(nameBlock) : (extractDisplayNameFromArticle(article, handle) || '');
+    const verified = isVerifiedFrom(nameBlock || article);
+
+    // 前提ゲート: 認証済みのみを処理対象にする
+    if (REQUIRE_VERIFIED && !verified) {
+      if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
+      return;
+    }
+
     // 表示名が取れていない時の条件1ガード
     const rawCond1 = !!displayName && !hasJapanese(displayName);
-    const rawCond2 = isVerifiedFrom(nameBlock || article);
-    const cond1 = ENABLE_COND1 ? rawCond1 : true;
-    const cond2 = ENABLE_COND2 ? rawCond2 : true;
+    const cond1 = COND_1 ? rawCond1 : true;
 
-    const needsProfile = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDB || ENABLE_CONDC;
+    const needsProfile = COND_2 || COND_3 || COND_4 || COND_A || COND_B;
     const handleKey = String(handle).toLowerCase();
+
+    // フォロワー数が多いアカウントは除外
+    if (EXCLUDE_HIGH_FOLLOWERS) {
+      const m = userMetricsCache.get(handleKey);
+      const fc = m?.followersCount;
+      if (typeof fc === 'number' && Number.isFinite(fc) && fc >= EXCLUDE_HIGH_FOLLOWERS_MIN) {
+        log('skip (high follower count)', `@${handle}`, { followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
+        processedHandles.add(handle);
+        return;
+      }
+    }
 
     let profileText = '';
     let bio = '';
@@ -519,40 +568,40 @@
       bio = cached.bio || '';
       profileEmpty = cached.profileEmpty === true;
 
-      // 条件3/4/B が有効なのにプロフィール文が取れない場合は待つ（ただし条件C成立なら待たない）
+      // 条件2/3/B が有効なのにプロフィール文が取れない場合は待つ（ただし優先条件A成立なら待たない）
       const hasProfileTextNow = !!profileText;
-      const rawCondCNow = rawCond2 && profileEmpty;
-      const condCNow = ENABLE_CONDC && rawCondCNow;
+      const rawCondANow = verified && profileEmpty;
+      const condANow = COND_A && rawCondANow;
 
-      const needsNonEmptyProfileText = ENABLE_COND3 || ENABLE_COND4 || ENABLE_CONDB;
-      if (!condCNow && needsNonEmptyProfileText && !hasProfileTextNow) {
+      const needsNonEmptyProfileText = COND_2 || COND_3 || COND_B;
+      if (!condANow && needsNonEmptyProfileText && !hasProfileTextNow) {
         if (attempts >= PROFILE_MAX_RETRIES) processedHandles.add(handle);
         return;
       }
     }
 
     const hasProfileText = !!profileText;
-    const rawCond3 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
-    const rawCond4 = hasProfileText ? !hasJapanese(profileText) : false;
-    const cond3 = ENABLE_COND3 ? rawCond3 : true;
-    const cond4 = ENABLE_COND4 ? rawCond4 : true;
+    const rawCond2 = hasProfileText ? includesAnyKeyword(`${profileText}\n${displayName}`) : false;
+    const rawCond3 = hasProfileText ? !hasJapanese(profileText) : false;
+    const rawCond4 = (hasProfileText || profileEmpty);
+    const cond2 = COND_2 ? rawCond2 : true;
+    const cond3 = COND_3 ? rawCond3 : true;
+    const cond4 = COND_4 ? rawCond4 : true;
 
     const simplifiedInName = hasSimplified(displayName);
     const simplifiedInProfile = hasSimplified(profileText);
-    // 条件B: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
-    const rawCondB = rawCond2 && rawCond4 && (rawCond1 || simplifiedInName || simplifiedInProfile);
-    const rawCondC = rawCond2 && profileEmpty;
-    const condB = ENABLE_CONDB && rawCondB;
-    const condC = ENABLE_CONDC && rawCondC;
+    // 優先条件A/B（強制block）
+    const rawCondA = verified && profileEmpty;
+    const rawCondB = verified && rawCond3 && (rawCond1 || simplifiedInName || simplifiedInProfile);
+    const trigA = COND_A && rawCondA;
+    const trigB = COND_B && rawCondB;
 
-    const shouldAct = condB || condC || (cond1 && cond2 && cond3 && cond4);
+    // 通常条件（Verified前提のためcond2は廃止）
+    const trigNormal = (cond1 && cond2 && cond3 && cond4);
+
+    const shouldAct = trigA || trigB || trigNormal;
 
     if (!shouldAct) {
-      // 特殊条件B/Cが無効な場合のみ、表示名/認証の早期除外
-      if (!ENABLE_CONDB && !ENABLE_CONDC && (!cond1 || !cond2)) {
-        if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
-        return;
-      }
       processedHandles.add(handle);
       return;
     }
@@ -560,12 +609,13 @@
     const reason = {
       raw: {
         cond1: rawCond1,
+        verified,
         cond2: rawCond2,
         cond3: rawCond3,
         cond4: rawCond4,
-        condA: 'unknown',
+        followStatus: 'unknown',
+        condA: rawCondA,
         condB: rawCondB,
-        condC: rawCondC,
       },
       displayName,
       bio: bio.slice(0, 140),
@@ -573,7 +623,7 @@
       profileEmpty,
     };
 
-    const actionToRun = (condB || condC) ? 'block' : ACTION;
+    const actionToRun = (trigA || trigB) ? 'block' : ACTION;
 
     const opened = await openTweetMenu(article);
     if (!opened) {
@@ -581,10 +631,10 @@
       return;
     }
 
-    // 条件A（フォロー中除外）
-    if (ENABLE_CONDA) {
+    // 除外: フォロー中ユーザーは実行しない
+    if (EXCLUDE_FOLLOWED) {
       const followStatus = getFollowStatusFromMenu();
-      reason.raw.condA = followStatus;
+      reason.raw.followStatus = followStatus;
 
       if (followStatus === 'followed') {
         log('skip (followed user)', `@${handle}`);
@@ -661,5 +711,5 @@
   setTimeout(scanLoop, 1200);
   setInterval(() => { scanLoop(); }, Math.max(900, SCAN_INTERVAL_MS));
 
-  log('loaded', { ACTION, DRY_RUN, KEYWORDS, ENABLE_COND1, ENABLE_COND2, ENABLE_COND3, ENABLE_COND4, ENABLE_CONDA, ENABLE_CONDB, ENABLE_CONDC });
+  log('loaded', { ACTION, DRY_RUN, KEYWORDS, REQUIRE_VERIFIED, COND_1, COND_2, COND_3, COND_4, COND_A, COND_B, EXCLUDE_FOLLOWED, EXCLUDE_HIGH_FOLLOWERS, EXCLUDE_HIGH_FOLLOWERS_MIN });
 })();
