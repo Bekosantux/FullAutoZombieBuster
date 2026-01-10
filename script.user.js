@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.1
+// @version      1.5.2
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -58,7 +58,7 @@
   };
 
   // 簡体字に頻出の漢字
-  const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资]/;
+  const SIMPLIFIED_ONLY_RE = /[们门这说吗为对时见关东车发经书买两开网应进动电气简后兴诗记爱资盈币]/;
 
   const hasSimplified = (text) => SIMPLIFIED_ONLY_RE.test(String(text || ''));
 
@@ -519,6 +519,20 @@
   const handleSeenCount = new Map();
   const followCheckAttempts = new Map();
 
+  // 会話タイムライン先頭ツイート（＝スレ主とみなす）の handle（lower）
+  let timelineOwnerHandleKey = null;
+  let timelineOwnerLastPathname = '';
+
+  function updateTimelineOwnerFromConversationTop(root) {
+    if (timelineOwnerHandleKey) return;
+    const articles = getTweetArticles(root);
+    if (!articles.length) return;
+    const first = articles[0];
+    const nb = extractUserNameBlock(first);
+    const h = extractHandleFromLinks(nb) || extractHandleFromLinks(first);
+    if (h) timelineOwnerHandleKey = String(h).toLowerCase();
+  }
+
   setupNetworkSniffer();
 
   async function evaluateAndActOnArticle(article) {
@@ -526,6 +540,11 @@
 
     const handle = extractHandleFromLinks(nameBlock) || extractHandleFromLinks(article);
     if (!handle) return;
+    if (timelineOwnerHandleKey && String(handle).toLowerCase() === timelineOwnerHandleKey) {
+      debugEval(handle, { outcome: 'excluded_timeline_owner' });
+      processedHandles.add(handle);
+      return;
+    }
     if (processedHandles.has(handle)) return;
 
     handleSeenCount.set(handle, (handleSeenCount.get(handle) || 0) + 1);
@@ -730,6 +749,13 @@
 
       const root = getConversationRoot();
       if (!root) return;
+
+      if (location.pathname !== timelineOwnerLastPathname) {
+        timelineOwnerLastPathname = location.pathname;
+        timelineOwnerHandleKey = null;
+      }
+
+      updateTimelineOwnerFromConversationTop(root);
 
       const articles = getTweetArticles(root);
       for (const a of articles) {
