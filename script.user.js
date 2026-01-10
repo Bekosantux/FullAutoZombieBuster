@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Full Auto Zombie Buster
 // @namespace    https://com.bekosantux.full-auto-zombie-buster
-// @version      1.5.3
+// @version      1.5.4
 // @description  X (Twitter) の返信欄（会話タイムライン）で、条件を満たすアカウントをBotとして自動でブロック/ミュートします。
 // @match        https://x.com/*
 // @match        https://twitter.com/*
@@ -21,28 +21,36 @@
   const KEYWORDS = ['Web3', 'Crypto', 'AI', 'NFT', 'Trader', 'Wᴇʙ3', 'Business', 'News', 'Marketing', 'BTC', 'Bitcoin', 'ETH', 'MeMeMax']; // 小文字大文字は区別されません
 
   // 前提: 認証済み（Verified）アカウントのみを処理対象にする
-  const REQUIRE_VERIFIED = true;
+    const REQUIRE_VERIFIED = true;
 
-  // 通常条件（Verified前提の上で判定）
-  const COND_1 = true; // 1) 表示名に日本語が含まれていない
-  const COND_2 = true; // 2) キーワード（プロフィール+表示名）
-  const COND_3 = true; // 3) プロフィールに日本語が含まれていない
-  const COND_4 = true; // 4) プロフィールが取得できている（空欄でも可）
+  // ----- 通常条件-----
+  // 以下の条件をすべて満たす場合に処理対象とする
 
-  // 除外: フォロー中のユーザーはあらゆる条件から除外
-  const EXCLUDE_FOLLOWED = true;
+    const COND_1 = true; // 1) 表示名に日本語が含まれていない
+    const COND_2 = true; // 2) キーワード（プロフィール+表示名）
+    const COND_3 = true; // 3) プロフィールに日本語が含まれていない
+    const COND_4 = true; // 4) プロフィールが取得できている（空欄でも可）
 
-  // 優先条件B（強制block）: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
-  // 誤爆の可能性があるためデフォルトでは無効
-  const COND_B = false;
+  // ----- 優先条件（強制処理）-----
+  // 条件を満たす場合、通常条件に関係なく強制的に処理対象とする
 
-  // 優先条件A（強制block）: 認証済み & プロフィール空欄
-  // 誤爆の可能性があるためデフォルトでは無効
-  const COND_A = false;
+    // 優先条件A（強制block）: 認証済み & プロフィール空欄
+    // 誤爆の可能性があるためデフォルトでは無効
+    const COND_A = false;
 
-  // 除外: フォロワー数が一定以上のアカウントは除外する（大きいアカウントの誤爆回避）
-  const EXCLUDE_HIGH_FOLLOWERS = true;
-  const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000; // ここを変更すると閾値を変えられます
+    // 優先条件B（強制block）: 認証済み &（プロフィールが日本語なし）&（表示名が日本語なし OR 表示名/プロフィールに簡体字がある）
+    // 誤爆の可能性があるためデフォルトでは無効
+    const COND_B = false;
+
+  // ----- 除外設定 -----
+  // 対象のユーザーは処理対象から除外する（優先条件を含む）
+    
+    // 除外: フォロー中のユーザーはあらゆる条件から除外
+    const EXCLUDE_FOLLOWED = true;
+
+    // 除外: フォロワー数が一定以上のアカウントは除外する
+    const EXCLUDE_HIGH_FOLLOWERS = true;
+    const EXCLUDE_HIGH_FOLLOWERS_MIN = 10_000; // ここを変更すると閾値を変えられます
 
   const SCAN_INTERVAL_MS = 1000;
   const PROFILE_MAX_RETRIES = 6;
@@ -65,13 +73,24 @@
 
   const shouldDebugWait = (n) => (n === 1 || n === PROFILE_MAX_RETRIES || (n % 2 === 0));
 
+  // デバッグログの重複抑制: 同一ユーザー×同一outcomeは1回だけ（wait系は除外）
+  const debugOutcomeLogged = new Set();
+
   const debugEval = (handle, payload) => {
     if (!DEBUG_LOG_EVALUATION) return;
+    const outcome = String(payload?.outcome || '');
+    const handleKey = String(payload?.handleKey || (handle ? String(handle).toLowerCase() : '?'));
+    const allowRepeat = outcome.startsWith('wait_');
+    const dedupeKey = `${handleKey}|${outcome}`;
+    if (!allowRepeat) {
+      if (debugOutcomeLogged.has(dedupeKey)) return;
+      debugOutcomeLogged.add(dedupeKey);
+    }
     const base = {
       ts: new Date().toISOString(),
       path: location.pathname,
     };
-    log('eval', `@${handle || '?'}`, { ...base, ...payload });
+    log('eval', `@${handle || '?'}`, { ...base, handleKey, ...payload });
   };
 
   // 簡体字に頻出の漢字
@@ -531,6 +550,7 @@
   }
 
   // ===== スキャン・判定 =====
+  // lower(handle) を格納（大文字小文字差での重複処理を防ぐ）
   const processedHandles = new Set();
   const handleAttempts = new Map();
   const handleSeenCount = new Map();
@@ -561,22 +581,23 @@
       debugEval('?', { outcome: 'skip_no_handle', permalink });
       return;
     }
-    if (timelineOwnerHandleKey && String(handle).toLowerCase() === timelineOwnerHandleKey) {
-      debugEval(handle, { outcome: 'excluded_timeline_owner', permalink, timelineOwnerHandleKey });
-      processedHandles.add(handle);
+    const handleKey = String(handle).toLowerCase();
+    if (timelineOwnerHandleKey && handleKey === timelineOwnerHandleKey) {
+      debugEval(handle, { outcome: 'excluded_timeline_owner', permalink, timelineOwnerHandleKey, handleKey });
+      processedHandles.add(handleKey);
       return;
     }
-    if (processedHandles.has(handle)) return;
+    if (processedHandles.has(handleKey)) return;
 
-    handleSeenCount.set(handle, (handleSeenCount.get(handle) || 0) + 1);
+    handleSeenCount.set(handleKey, (handleSeenCount.get(handleKey) || 0) + 1);
 
     const displayName = nameBlock ? extractDisplayNameFromNameBlock(nameBlock) : (extractDisplayNameFromArticle(article, handle) || '');
     const verified = isVerifiedFrom(nameBlock || article);
 
     // 前提ゲート: 認証済みのみを処理対象にする
     if (REQUIRE_VERIFIED && !verified) {
-      debugEval(handle, { outcome: 'skip_not_verified', permalink });
-      if ((handleSeenCount.get(handle) || 0) >= 3) processedHandles.add(handle);
+      debugEval(handle, { outcome: 'skip_not_verified', permalink, handleKey });
+      if ((handleSeenCount.get(handleKey) || 0) >= 3) processedHandles.add(handleKey);
       return;
     }
 
@@ -585,16 +606,15 @@
     const cond1 = COND_1 ? rawCond1 : true;
 
     const needsProfile = COND_2 || COND_3 || COND_4 || COND_A || COND_B;
-    const handleKey = String(handle).toLowerCase();
 
     // フォロワー数が多いアカウントは除外
     if (EXCLUDE_HIGH_FOLLOWERS) {
       const m = userMetricsCache.get(handleKey);
       const fc = m?.followersCount;
       if (typeof fc === 'number' && Number.isFinite(fc) && fc >= EXCLUDE_HIGH_FOLLOWERS_MIN) {
-        debugEval(handle, { outcome: 'excluded_high_followers', permalink, verified, followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
+        debugEval(handle, { outcome: 'excluded_high_followers', permalink, handleKey, verified, followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
         log('skip (high follower count)', `@${handle}`, { followersCount: fc, min: EXCLUDE_HIGH_FOLLOWERS_MIN });
-        processedHandles.add(handle);
+        processedHandles.add(handleKey);
         return;
       }
     }
@@ -612,6 +632,7 @@
           debugEval(handle, {
             outcome: 'wait_profile_cache',
             permalink,
+            handleKey,
             verified,
             attempts,
             max: PROFILE_MAX_RETRIES,
@@ -622,8 +643,8 @@
           });
         }
         if (attempts >= PROFILE_MAX_RETRIES) {
-          debugEval(handle, { outcome: 'give_up_profile', permalink, verified, attempts, max: PROFILE_MAX_RETRIES });
-          processedHandles.add(handle);
+          debugEval(handle, { outcome: 'give_up_profile', permalink, handleKey, verified, attempts, max: PROFILE_MAX_RETRIES });
+          processedHandles.add(handleKey);
         }
         return;
       }
@@ -643,6 +664,7 @@
           debugEval(handle, {
             outcome: 'wait_profile_text',
             permalink,
+            handleKey,
             verified,
             attempts,
             max: PROFILE_MAX_RETRIES,
@@ -655,8 +677,8 @@
           });
         }
         if (attempts >= PROFILE_MAX_RETRIES) {
-          debugEval(handle, { outcome: 'give_up_profile_text', permalink, verified, attempts, max: PROFILE_MAX_RETRIES });
-          processedHandles.add(handle);
+          debugEval(handle, { outcome: 'give_up_profile_text', permalink, handleKey, verified, attempts, max: PROFILE_MAX_RETRIES });
+          processedHandles.add(handleKey);
         }
         return;
       }
@@ -712,7 +734,7 @@
 
     if (!shouldAct) {
       debugEval(handle, { ...evaluation, outcome: 'skip_no_match' });
-      processedHandles.add(handle);
+      processedHandles.add(handleKey);
       return;
     }
 
@@ -738,7 +760,7 @@
     const opened = await openTweetMenu(article);
     if (!opened) {
       debugEval(handle, { ...evaluation, outcome: 'skip_menu_open_failed', action: actionToRun });
-      processedHandles.add(handle);
+      processedHandles.add(handleKey);
       return;
     }
 
@@ -752,7 +774,7 @@
         log('skip (followed user)', `@${handle}`);
         await closeMenuIfOpen();
         await waitMenuClosed(800);
-        processedHandles.add(handle);
+        processedHandles.add(handleKey);
         return;
       }
 
@@ -770,7 +792,7 @@
         // 何度もunknownが続く場合はキャンセル
         if (n >= 3) {
           debugEval(handle, { ...evaluation, outcome: 'give_up_follow_unknown', followStatus, tries: n, action: actionToRun });
-          processedHandles.add(handle);
+          processedHandles.add(handleKey);
         }
         return;
       }
@@ -781,7 +803,7 @@
       log(`DRY_RUN: ${actionToRun} 対象`, `@${handle}`, reason);
       await closeMenuIfOpen();
       await waitMenuClosed(800);
-      processedHandles.add(handle);
+      processedHandles.add(handleKey);
       return;
     }
 
@@ -795,7 +817,7 @@
       if (ok) await confirmBlockIfNeeded();
     }
 
-    processedHandles.add(handle);
+    processedHandles.add(handleKey);
   }
 
   let lastScanAt = 0;
